@@ -8,6 +8,7 @@ Usage: `cuprated [OPTIONS]`
 
 | Option | Description | Default | Possible values |
 |--------|-------------|---------|-----------------|
+| `--dry-run` | Perform a dry run to validate configuration and exit | |
 | `--network <NETWORK>` | The network to run on | `mainnet` | `mainnet`, `testnet`, `stagenet`
 | `--outbound-connections <OUTBOUND_CONNECTIONS>` | The amount of outbound clear-net connections to maintain | `64` |
 | `--config-file <CONFIG_FILE>` | The PATH of the `cuprated` config file | `Cuprated.toml` |
@@ -32,4 +33,3 @@ The `--version` flag outputs the following info in JSON.
 | `semantic_version`      | String | Semantic version of `cuprated`                        |
 | `build`                 | String | Build of `cuprated`, either `debug` or `release`      |
 | `commit`                | String | `git` commit hash of `cuprated`                       |
-| `killswitch_timestamp`  | Number | Timestamp at which `cuprated`'s killswitch activates  |

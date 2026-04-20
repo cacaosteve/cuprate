@@ -1,29 +1,33 @@
 use std::{
+    cmp::{max, min},
     marker::PhantomData,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::Path,
     time::Duration,
 };
 
-use arti_client::{
-    config::onion_service::{OnionServiceConfig, OnionServiceConfigBuilder},
-    TorClient, TorClientBuilder, TorClientConfig,
-};
 use serde::{Deserialize, Serialize};
-use tor_rtcompat::PreferredRuntime;
 
-use cuprate_helper::{fs::address_book_path, network::Network};
+use cuprate_helper::{cast::u64_to_usize, fs::address_book_path, network::Network};
 use cuprate_p2p::config::TransportConfig;
 use cuprate_p2p_core::{
     transports::{Tcp, TcpServerConfig},
     ClearNet, NetworkZone, Tor, Transport,
 };
-use cuprate_p2p_transport::{Arti, ArtiClientConfig, ArtiServerConfig};
 use cuprate_wire::OnionAddr;
 
+use super::{default::DefaultOrCustom, macros::config_struct};
 use crate::{p2p::ProxySettings, tor::TorMode};
 
-use super::{default::DefaultOrCustom, macros::config_struct};
+#[cfg(feature = "arti")]
+use {
+    arti_client::{
+        config::onion_service::{OnionServiceConfig, OnionServiceConfigBuilder},
+        TorClient, TorClientBuilder, TorClientConfig,
+    },
+    cuprate_p2p_transport::{Arti, ArtiClientConfig, ArtiServerConfig, Socks, SocksClientConfig},
+    tor_rtcompat::PreferredRuntime,
+};
 
 config_struct! {
     /// P2P config.
@@ -60,7 +64,7 @@ config_struct! {
         /// Type         | Number
         /// Valid values | >= 0
         /// Examples     | 1_000_000_000, 5_500_000_000, 500_000_000
-        pub buffer_bytes: usize,
+        pub buffer_bytes: DefaultOrCustom<usize>,
 
         #[comment_out = true]
         /// The size of the in progress queue (in bytes)
@@ -75,7 +79,7 @@ config_struct! {
         /// Type         | Number
         /// Valid values | >= 0
         /// Examples     | 500_000_000, 1_000_000_000,
-        pub in_progress_queue_bytes: usize,
+        pub in_progress_queue_bytes: DefaultOrCustom<usize>,
 
         #[inline = true]
         /// The duration between checking the client pool for free peers.
@@ -96,13 +100,19 @@ config_struct! {
     }
 }
 
-impl From<BlockDownloaderConfig> for cuprate_p2p::block_downloader::BlockDownloaderConfig {
-    fn from(value: BlockDownloaderConfig) -> Self {
-        Self {
-            buffer_bytes: value.buffer_bytes,
-            in_progress_queue_bytes: value.in_progress_queue_bytes,
-            check_client_pool_interval: value.check_client_pool_interval,
-            target_batch_bytes: value.target_batch_bytes,
+impl BlockDownloaderConfig {
+    /// Constructs the config given to the p2p crate.
+    pub fn construct_inner(
+        &self,
+        total_memory: u64,
+    ) -> cuprate_p2p::block_downloader::BlockDownloaderConfig {
+        let buffer_mem = u64_to_usize(min(total_memory / 5, 1024 * 1024 * 1024));
+
+        cuprate_p2p::block_downloader::BlockDownloaderConfig {
+            buffer_bytes: *self.buffer_bytes.value(&buffer_mem),
+            in_progress_queue_bytes: *self.in_progress_queue_bytes.value(&(buffer_mem / 2)),
+            check_client_pool_interval: self.check_client_pool_interval,
+            target_batch_bytes: self.target_batch_bytes,
             initial_batch_len: 1,
         }
     }
@@ -111,8 +121,8 @@ impl From<BlockDownloaderConfig> for cuprate_p2p::block_downloader::BlockDownloa
 impl Default for BlockDownloaderConfig {
     fn default() -> Self {
         Self {
-            buffer_bytes: 1_000_000_000,
-            in_progress_queue_bytes: 500_000_000,
+            buffer_bytes: DefaultOrCustom::Default,
+            in_progress_queue_bytes: DefaultOrCustom::Default,
             check_client_pool_interval: Duration::from_secs(30),
             target_batch_bytes: 15_000_000,
         }
@@ -164,8 +174,8 @@ config_struct! {
         /// This port will be bind to if the incoming P2P
         /// server for this zone has been enabled.
         ///
-        /// Type         | Number
-        /// Valid values | 0..65534
+        /// Type         | Number or "Default"
+        /// Valid values | 0..65534, "Default"
         /// Examples     | 18080, 9999, 5432
         pub p2p_port: DefaultOrCustom<u16>,
 

@@ -82,7 +82,7 @@ As of May 1st 2025, `cuprated`'s database is ~270GB in size.
 
 This is 1.2x larger.
 
-This is planned to be improved in the future.
+There is [on-going](https://github.com/Cuprate/cuprate/pull/564) [work](https://github.com/Cuprate/cuprate/pull/566) that will allow `cuprated` to use noticeably less disk space than `monerod`.
 
 ## Is the database compatible with `monerod`?
 No.
@@ -90,24 +90,14 @@ No.
 The database `cuprated` generates and uses cannot directly be used by `monerod` and vice-versa. Supporting this is possible but there are no current plans to do so.
 
 ## Can I connect a wallet to `cuprated`?
-Not yet.
+Soon.
 
 Wallets require the [daemon RPC API](https://docs.getmonero.org/rpc-library/monerod-rpc). This is actively being worked on to be backwards compatible with `monerod`, see the [RPC section](rpc.md) for more information.
 
 ## Can `cuprated` be used with an anonymity network like Tor?
-Not yet (directly).
+Yes.
 
-Tor is planned to be integrated into `cuprated` via [`arti`](https://arti.torproject.org), although this is not yet available.
-
-## `cuprated` won't start because of a "killswitch", why?
-The current alpha builds of `cuprated` contain killswitches that activate 1 week after the _next_ release is out. If the killswitch activates, you must upgrade to the [latest release](https://github.com/Cuprate/cuprate/releases/latest).
-
-The reasoning for why this exists can be found here: <https://github.com/Cuprate/cuprate/pull/365>.
-
-## What is the release schedule?
-New versions of `cuprated` are planned to release every 4 weeks.
-
-See [this GitHub issue](https://github.com/Cuprate/cuprate/issues/374) for more details.
+Tor and [`arti`](https://arti.torproject.org) support have been integrated into `cuprated`. See [config](./config.md) for configuration options.
 
 ## What is the versioning scheme?
 `cuprated` is currently in alpha (`0.0.x`).

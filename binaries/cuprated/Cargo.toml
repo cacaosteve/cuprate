@@ -1,25 +1,27 @@
 [package]
 name = "cuprated"
-version = "0.0.6"
+version = "0.0.8"
 edition = "2021"
 description = "The Cuprate Rust Monero node."
 license = "AGPL-3.0-only"
 authors = ["Boog900", "hinto-janai", "SyntheticBird45"]
 repository = "https://github.com/Cuprate/cuprate/tree/main/binaries/cuprated"
 
+[features]
+default = ["arti"]
+arti = ["arti-client", "tor-hsservice", "tor-persist", "tor-rtcompat", "cuprate-p2p-transport/arti"]
+
 [dependencies]
 # TODO: after v1.0.0, remove unneeded dependencies.
 cuprate-address-book      = { workspace = true }
 cuprate-async-buffer      = { workspace = true }
-cuprate-blockchain        = { workspace = true }
+cuprate-blockchain        = { workspace = true, features = ["serde"] }
 cuprate-consensus-context = { workspace = true }
 cuprate-consensus-rules   = { workspace = true }
 cuprate-consensus         = { workspace = true }
 cuprate-constants         = { workspace = true, features = ["build", "rpc"] }
 cuprate-cryptonight       = { workspace = true }
 cuprate-dandelion-tower   = { workspace = true, features = ["txpool"] }
-cuprate-database-service  = { workspace = true, features = ["serde"] }
-cuprate-database          = { workspace = true, features = ["serde"] }
 cuprate-epee-encoding     = { workspace = true }
 cuprate-fast-sync         = { workspace = true }
 cuprate-fixed-bytes       = { workspace = true }
@@ -38,11 +40,10 @@ cuprate-txpool            = { workspace = true }
 cuprate-types             = { workspace = true, features = ["json"] }
 cuprate-wire              = { workspace = true }
 
-
 # TODO: after v1.0.0, remove unneeded dependencies.
 axum                  = { workspace = true, features = ["tokio", "http1", "http2"] }
 anyhow                = { workspace = true }
-arti-client           = { workspace = true, features = ["tokio", "native-tls", "onion-service-client", "onion-service-service", "static"] }
+arti-client           = { workspace = true, features = ["tokio", "native-tls", "onion-service-client", "onion-service-service", "static"], optional = true }
 async-trait           = { workspace = true }
 bitflags              = { workspace = true }
 borsh                 = { workspace = true }
@@ -57,6 +58,7 @@ curve25519-dalek      = { workspace = true }
 const_format          = { workspace = true, features = ["all"] }
 dashmap               = { workspace = true }
 dirs                  = { workspace = true }
+fjall                 = { workspace = true }
 futures               = { workspace = true }
 hex                   = { workspace = true }
 hex-literal           = { workspace = true }
@@ -75,6 +77,7 @@ serde_bytes           = { workspace = true }
 serde_json            = { workspace = true }
 serde                 = { workspace = true }
 strum                 = { workspace = true }
+sysinfo               = { workspace = true, features = ["system"] }
 thiserror             = { workspace = true }
 thread_local          = { workspace = true }
 tokio-util            = { workspace = true, features = ["rt"] }
@@ -82,9 +85,9 @@ tokio-stream          = { workspace = true }
 tokio                 = { workspace = true }
 toml                  = { workspace = true, features = ["parse", "display", "serde"]}
 toml_edit             = { workspace = true, features = ["parse", "display"] }
-tor-hsservice         = { workspace = true }
-tor-persist           = { workspace = true }
-tor-rtcompat          = { workspace = true }
+tor-hsservice         = { workspace = true, optional = true }
+tor-persist           = { workspace = true, optional = true }
+tor-rtcompat          = { workspace = true, optional = true }
 tower                 = { workspace = true, features = ["limit"] }
 tower-http            = { workspace = true, features = ["limit"] }
 tracing-appender      = { workspace = true }

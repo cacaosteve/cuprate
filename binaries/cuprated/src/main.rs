@@ -18,8 +18,7 @@
 
 use std::{mem, sync::Arc};
 
-use p2p::initialize_zones_p2p;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tower::{Service, ServiceExt};
 use tracing::{error, info, level_filters::LevelFilter};
 use tracing_subscriber::{layer::SubscriberExt, reload::Handle, util::SubscriberInitExt, Registry};
@@ -27,24 +26,23 @@ use tracing_subscriber::{layer::SubscriberExt, reload::Handle, util::SubscriberI
 use cuprate_consensus_context::{
     BlockChainContextRequest, BlockChainContextResponse, BlockchainContextService,
 };
-use cuprate_database::{InitError, DATABASE_CORRUPT_MSG};
 use cuprate_helper::time::secs_to_hms;
 use cuprate_p2p_core::{transports::Tcp, ClearNet};
 use cuprate_types::blockchain::BlockchainWriteRequest;
 use txpool::IncomingTxHandler;
 
 use crate::{
+    blockchain::SyncNotify,
     config::Config,
-    constants::PANIC_CRITICAL_SERVICE_ERROR,
+    constants::{DATABASE_CORRUPT_MSG, PANIC_CRITICAL_SERVICE_ERROR},
     logging::CupratedTracingFilter,
-    tor::{initialize_tor_if_enabled, TorMode},
+    tor::initialize_tor_if_enabled,
 };
 
 mod blockchain;
 mod commands;
 mod config;
 mod constants;
-mod killswitch;
 mod logging;
 mod p2p;
 mod rpc;
@@ -55,8 +53,8 @@ mod txpool;
 mod version;
 
 fn main() {
-    // Initialize the killswitch.
-    killswitch::init_killswitch();
+    // Set global private permissions for created files.
+    cuprate_helper::fs::set_private_global_file_permissions();
 
     // Initialize global static `LazyLock` data.
     statics::init_lazylock_statics();
@@ -77,22 +75,31 @@ fn main() {
 
     let rt = init_tokio_rt(&config);
 
-    let db_thread_pool = cuprate_database_service::init_thread_pool(
-        cuprate_database_service::ReaderThreads::Number(config.storage.reader_threads),
+    let db_thread_pool = Arc::new(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(config.storage.reader_threads)
+            .build()
+            .unwrap(),
     );
 
     // Start the blockchain & tx-pool databases.
 
+    let fjall_db = fjall::Database::builder(config.fjall_directory())
+        .cache_size(config.fjall_cache_size())
+        .open()
+        .unwrap();
+
     let (mut blockchain_read_handle, mut blockchain_write_handle, _) =
         cuprate_blockchain::service::init_with_pool(
-            config.blockchain_config(),
+            &config.blockchain_config(),
+            fjall_db.clone(),
             Arc::clone(&db_thread_pool),
         )
         .inspect_err(|e| error!("Blockchain database error: {e}"))
         .expect(DATABASE_CORRUPT_MSG);
 
-    let (txpool_read_handle, txpool_write_handle, _) =
-        cuprate_txpool::service::init_with_pool(&config.txpool_config(), db_thread_pool)
+    let (txpool_read_handle, txpool_write_handle) =
+        cuprate_txpool::service::init_with_pool(fjall_db, db_thread_pool)
             .inspect_err(|e| error!("Txpool database error: {e}"))
             .expect(DATABASE_CORRUPT_MSG);
 
@@ -124,22 +131,30 @@ fn main() {
 
         // Bootstrap or configure Tor if enabled.
         let tor_context = initialize_tor_if_enabled(&config).await;
+        let tor_enabled = config.p2p.tor_net.enabled;
 
-        // Start p2p network zones
-        let (network_interfaces, tx_handler_subscribers) = p2p::initialize_zones_p2p(
+        // Create the sync notifier and handle.
+        let (sync_notify, syncer_handle) = SyncNotify::new();
+
+        // Start clearnet P2P zone
+        let (clearnet_interface, clearnet_tx_handler_subscriber) = p2p::initialize_clearnet_p2p(
             &config,
             context_svc.clone(),
             blockchain_read_handle.clone(),
             txpool_read_handle.clone(),
-            tor_context,
+            &tor_context,
+            sync_notify.callback(context_svc.clone()),
         )
         .await;
+
+        // Create Tor router delivery channel.
+        let (tor_router_tx, tor_router_rx) = tor_enabled.then(oneshot::channel).unzip();
 
         // Create the incoming tx handler service.
         let tx_handler = IncomingTxHandler::init(
             config.storage.txpool.clone(),
-            network_interfaces.clearnet_network_interface.clone(),
-            network_interfaces.tor_network_interface,
+            clearnet_interface.clone(),
+            tor_router_rx,
             txpool_write_handle.clone(),
             txpool_read_handle.clone(),
             context_svc.clone(),
@@ -147,33 +162,72 @@ fn main() {
         )
         .await;
 
-        // Send tx handler sender to all network zones
-        for zone in tx_handler_subscribers {
-            if zone.send(tx_handler.clone()).is_err() {
-                unreachable!()
-            }
+        // Send tx handler sender to clearnet zone
+        if clearnet_tx_handler_subscriber
+            .send(tx_handler.clone())
+            .is_err()
+        {
+            unreachable!()
         }
 
         // Initialize the blockchain manager.
         blockchain::init_blockchain_manager(
-            network_interfaces.clearnet_network_interface,
+            clearnet_interface,
             blockchain_write_handle,
             blockchain_read_handle.clone(),
             tx_handler.txpool_manager.clone(),
             context_svc.clone(),
             config.block_downloader_config(),
+            syncer_handle,
         )
         .await;
 
         // Initialize the RPC server(s).
         rpc::init_rpc_servers(
-            config.rpc,
+            config.rpc.clone(),
             config.network,
-            blockchain_read_handle,
+            blockchain_read_handle.clone(),
             context_svc.clone(),
-            txpool_read_handle,
-            tx_handler,
+            txpool_read_handle.clone(),
+            tx_handler.clone(),
         );
+
+        // Start Tor P2P zone after sync completes.
+        if tor_enabled {
+            info!("Tor P2P zone will start after sync.");
+            let context_svc = context_svc.clone();
+
+            tokio::spawn(async move {
+                // Wait for the node to synchronize with the network
+                if sync_notify.wait_for_synced().await.is_err() {
+                    tracing::info!("Not starting Tor P2P zone, syncer stopped");
+                    return;
+                }
+                tracing::info!("Starting Tor P2P zone.");
+
+                let (tor_interface, tor_tx_handler_tx) = p2p::start_tor_p2p(
+                    &config,
+                    context_svc,
+                    blockchain_read_handle,
+                    txpool_read_handle,
+                    tor_context,
+                )
+                .await;
+
+                // Send the tx handler to the Tor zone
+                if tor_tx_handler_tx.send(tx_handler).is_err() {
+                    tracing::warn!("Failed to send tx handler to Tor zone.");
+                    return;
+                }
+
+                // Deliver the Tor network interface to the dandelion router.
+                if let Some(tx) = tor_router_tx {
+                    if tx.send(tor_interface).is_err() {
+                        tracing::warn!("Failed to deliver Tor router to dandelion pool.");
+                    }
+                }
+            });
+        }
 
         // Start the command listener.
         if std::io::IsTerminal::is_terminal(&std::io::stdin()) {

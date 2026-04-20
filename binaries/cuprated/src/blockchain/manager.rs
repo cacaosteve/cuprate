@@ -38,6 +38,7 @@ mod handler;
 mod tests;
 
 pub use commands::{BlockchainManagerCommand, IncomingBlockOk};
+use syncer::SyncerHandle;
 
 /// Initialize the blockchain manager.
 ///
@@ -50,6 +51,7 @@ pub async fn init_blockchain_manager(
     txpool_manager_handle: TxpoolManagerHandle,
     mut blockchain_context_service: BlockchainContextService,
     block_downloader_config: BlockDownloaderConfig,
+    syncer_handle: SyncerHandle,
 ) {
     // TODO: find good values for these size limits
     let (batch_tx, batch_rx) = mpsc::channel(1);
@@ -65,6 +67,7 @@ pub async fn init_blockchain_manager(
         batch_tx,
         Arc::clone(&stop_current_block_downloader),
         block_downloader_config,
+        syncer_handle,
     ));
 
     let manager = BlockchainManager {
@@ -99,7 +102,7 @@ pub struct BlockchainManager {
     /// The blockchain context cache, this caches the current state of the blockchain to quickly calculate/retrieve
     /// values without needing to go to a [`BlockchainReadHandle`].
     blockchain_context_service: BlockchainContextService,
-    /// A [`Notify`] to tell the [syncer](syncer::syncer) that we want to cancel this current download
+    /// A [`Notify`] to tell the [`syncer`](syncer::syncer) that we want to cancel this current download
     /// attempt.
     stop_current_block_downloader: Arc<Notify>,
     /// The broadcast service, to broadcast new blocks.

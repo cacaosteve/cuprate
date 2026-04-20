@@ -53,7 +53,7 @@ pub trait RandomX {
 
 /// Returns if this height is a RandomX seed height.
 pub const fn is_randomx_seed_height(height: usize) -> bool {
-    height % RX_SEEDHASH_EPOCH_BLOCKS == 0
+    height.is_multiple_of(RX_SEEDHASH_EPOCH_BLOCKS)
 }
 
 /// Returns the RandomX seed height for this block.
@@ -267,7 +267,7 @@ pub fn check_block(
     check_txs_unique(&block.transactions)?;
 
     let generated_coins = check_miner_tx(
-        &block.miner_transaction,
+        block.miner_transaction(),
         total_fees,
         block_chain_ctx.chain_height,
         block_weight,
