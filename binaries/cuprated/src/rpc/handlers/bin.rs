@@ -244,7 +244,10 @@ async fn block_output_indices_for_entries(
 
         if !no_miner_tx {
             tx_output_indices.push(TxOutputIndices {
-                indices: blockchain::tx_output_indexes(blockchain_read, block.miner_transaction.hash())
+                indices: blockchain::tx_output_indexes(
+                    blockchain_read,
+                    block.miner_transaction().hash(),
+                )
                     .await?,
             });
         }
