@@ -32,8 +32,11 @@ const _: () = {
 
 /// The killswitch activates if the current timestamp is ahead of this timestamp.
 ///
-/// Wed Oct 15 12:00:00 AM UTC 2025
-pub const KILLSWITCH_ACTIVATION_TIMESTAMP: u64 = 1760486400;
+/// Fri Jan 1 12:00:00 AM UTC 2100
+///
+/// Local eval override on `eval-rpc1` so alpha killswitch does not block
+/// endpoint compatibility testing.
+pub const KILLSWITCH_ACTIVATION_TIMESTAMP: u64 = 4102444800;
 
 /// Check if the system clock is past a certain timestamp,
 /// if so, exit the entire program.

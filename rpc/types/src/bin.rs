@@ -125,6 +125,7 @@ define_request_and_response! {
         prune: bool,
         no_miner_tx: bool = default::<bool>(), "default",
         pool_info_since: u64 = default::<u64>(), "default",
+        max_block_count: u64 = default::<u64>(), "default",
     },
 
     // TODO: add `top_block_hash` field

@@ -8,6 +8,12 @@ use std::num::NonZero;
 
 use anyhow::{anyhow, Error};
 use bytes::Bytes;
+use monero_oxide::{
+    block::Block,
+    primitives::keccak256,
+    transaction::{NotPruned, Transaction},
+};
+use cuprate_blockchain::service::BlockchainReadHandle;
 
 use cuprate_constants::rpc::{RESTRICTED_BLOCK_COUNT, RESTRICTED_TRANSACTIONS_COUNT};
 use cuprate_fixed_bytes::ByteArrayVec;
@@ -25,8 +31,8 @@ use cuprate_rpc_types::{
     misc::RequestedInfo,
 };
 use cuprate_types::{
-    rpc::{PoolInfo, PoolInfoExtent},
-    BlockCompleteEntry,
+    rpc::{BlockOutputIndices, PoolInfo, PoolInfoExtent, TxOutputIndices},
+    BlockCompleteEntry, PrunedTxBlobEntry, TransactionBlobs,
 };
 
 use crate::rpc::{
@@ -72,6 +78,7 @@ async fn get_blocks(
         prune,
         no_miner_tx,
         pool_info_since,
+        max_block_count,
     } = request;
 
     let block_hashes: Vec<[u8; 32]> = (&block_ids).into();
@@ -120,6 +127,31 @@ async fn get_blocks(
         return Ok(resp);
     }
 
+    if block_hashes.is_empty() && max_block_count != 0 {
+        let (height, _) = helper::top_height(&mut state).await?;
+        let current_height = u64_to_usize(height + 1);
+        let start_height_usize = u64_to_usize(start_height);
+        let max_block_count_usize = u64_to_usize(max_block_count);
+        let end_height = start_height_usize
+            .saturating_add(max_block_count_usize)
+            .min(current_height);
+
+        let heights: Vec<u64> = (start_height_usize..end_height).map(usize_to_u64).collect();
+        let blocks =
+            blockchain::block_complete_entries_by_height(&mut state.blockchain_read, heights).await?;
+        let blocks = wallet_compatible_block_entries(blocks)?;
+        let output_indices =
+            block_output_indices_for_entries(&mut state.blockchain_read, &blocks, no_miner_tx).await?;
+
+        return Ok(GetBlocksResponse {
+            blocks,
+            start_height,
+            current_height: usize_to_u64(current_height),
+            output_indices,
+            ..resp
+        });
+    }
+
     if let Some(block_id) = block_hashes.first() {
         let (height, hash) = helper::top_height(&mut state).await?;
 
@@ -151,6 +183,99 @@ async fn get_blocks(
         current_height: usize_to_u64(height),
         ..resp
     })
+}
+
+fn wallet_compatible_block_entries(
+    blocks: Vec<BlockCompleteEntry>,
+) -> Result<Vec<BlockCompleteEntry>, Error> {
+    blocks
+        .into_iter()
+        .map(|mut entry| {
+            if let Some(normal_txs) = entry.txs.clone().take_normal() {
+                let mut pruned_txs = Vec::with_capacity(normal_txs.len());
+                for tx_blob in normal_txs {
+                    let mut tx_bytes = tx_blob.as_ref();
+                    let tx: Transaction<NotPruned> = Transaction::read(&mut tx_bytes)?;
+                    if !tx_bytes.is_empty() {
+                        return Err(anyhow!("Transaction blob had extraneous bytes after parse"));
+                    }
+                    pruned_txs.push(PrunedTxBlobEntry {
+                        blob: tx_blob,
+                        prunable_hash: tx_prunable_hash(&tx).into(),
+                    });
+                }
+                entry.txs = TransactionBlobs::Pruned(pruned_txs);
+            }
+            Ok(entry)
+        })
+        .collect()
+}
+
+fn tx_prunable_hash(tx: &Transaction<NotPruned>) -> [u8; 32] {
+    match tx {
+        Transaction::V1 { .. } => [0; 32],
+        Transaction::V2 { proofs, .. } => {
+            if let Some(proofs) = proofs {
+                let mut buf = Vec::with_capacity(1024);
+                proofs
+                    .prunable
+                    .write(&mut buf, proofs.rct_type())
+                    .expect("write failed but Vec doesn't fail");
+                keccak256(buf)
+            } else {
+                [0; 32]
+            }
+        }
+    }
+}
+
+async fn block_output_indices_for_entries(
+    blockchain_read: &mut BlockchainReadHandle,
+    blocks: &[BlockCompleteEntry],
+    no_miner_tx: bool,
+) -> Result<Vec<BlockOutputIndices>, Error> {
+    let mut all_block_output_indices = Vec::with_capacity(blocks.len());
+
+    for entry in blocks {
+        let mut block_blob = entry.block.as_ref();
+        let block = Block::read(&mut block_blob)?;
+
+        let mut tx_output_indices = Vec::with_capacity(block.transactions.len() + usize::from(!no_miner_tx));
+
+        if !no_miner_tx {
+            tx_output_indices.push(TxOutputIndices {
+                indices: blockchain::tx_output_indexes(blockchain_read, block.miner_transaction.hash())
+                    .await?,
+            });
+        }
+
+        for tx_hash in &block.transactions {
+            tx_output_indices.push(TxOutputIndices {
+                indices: blockchain::tx_output_indexes(blockchain_read, *tx_hash).await?,
+            });
+        }
+
+        // Sanity check: if tx blobs are present, they should match tx hashes in the block blob.
+        if let Some(normal_txs) = entry.txs.clone().take_normal() {
+            if normal_txs.len() != block.transactions.len() {
+                return Err(anyhow!("Block tx hash count mismatched tx blob count"));
+            }
+
+            for (tx_blob, expected_hash) in normal_txs.into_iter().zip(&block.transactions) {
+                let mut tx_blob = tx_blob.as_ref();
+                let tx = Transaction::read(&mut tx_blob)?;
+                if tx.hash() != *expected_hash {
+                    return Err(anyhow!("Block tx blob hash mismatched tx hash in block"));
+                }
+            }
+        }
+
+        all_block_output_indices.push(BlockOutputIndices {
+            indices: tx_output_indices,
+        });
+    }
+
+    Ok(all_block_output_indices)
 }
 
 /// <https://github.com/monero-project/monero/blob/cc73fe71162d564ffda8e549b79a350bca53c454/src/rpc/core_rpc_server.cpp#L817-L857>
