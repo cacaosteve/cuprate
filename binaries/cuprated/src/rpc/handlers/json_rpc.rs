@@ -108,7 +108,7 @@ pub async fn map_request(
         Req::GetOutputHistogram(r) => Resp::GetOutputHistogram(not_available()?),
         Req::GetCoinbaseTxSum(r) => Resp::GetCoinbaseTxSum(not_available()?),
         Req::GetVersion(r) => Resp::GetVersion(get_version(state, r).await?),
-        Req::GetFeeEstimate(r) => Resp::GetFeeEstimate(not_available()?),
+        Req::GetFeeEstimate(r) => Resp::GetFeeEstimate(get_fee_estimate(state, r).await?),
         Req::GetAlternateChains(r) => Resp::GetAlternateChains(not_available()?),
         Req::RelayTx(r) => Resp::RelayTx(not_available()?),
         Req::SyncInfo(r) => Resp::SyncInfo(not_available()?),

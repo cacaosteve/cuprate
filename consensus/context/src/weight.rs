@@ -206,9 +206,27 @@ impl BlockWeightsCache {
         self.long_term_weights.median()
     }
 
+    /// Returns the long-term median after projecting `grace_blocks` future zero-weight blocks.
+    pub(crate) fn projected_median_long_term_weight(&self, grace_blocks: usize) -> usize {
+        let mut projected = self.long_term_weights.clone();
+        for _ in 0..grace_blocks {
+            projected.push(0);
+        }
+        projected.median()
+    }
+
     /// Returns the median weight over the last [`SHORT_TERM_WINDOW`] blocks, or custom amount of blocks in the config.
     pub fn median_short_term_weight(&self) -> usize {
         self.short_term_block_weights.median()
+    }
+
+    /// Returns the short-term median after projecting `grace_blocks` future zero-weight blocks.
+    pub(crate) fn projected_median_short_term_weight(&self, grace_blocks: usize) -> usize {
+        let mut projected = self.short_term_block_weights.clone();
+        for _ in 0..grace_blocks {
+            projected.push(0);
+        }
+        projected.median()
     }
 
     /// Returns the effective median weight, used for block reward calculations and to calculate

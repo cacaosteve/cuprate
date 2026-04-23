@@ -3,7 +3,10 @@
 //! This module contains the async task that handles keeping track of blockchain context.
 //! It holds all the context caches and handles [`tower::Service`] requests.
 //!
-use std::sync::Arc;
+use std::{
+    cmp::{max, min},
+    sync::Arc,
+};
 
 use arc_swap::ArcSwap;
 use futures::channel::oneshot;
@@ -11,7 +14,10 @@ use tokio::sync::mpsc;
 use tower::ServiceExt;
 use tracing::Instrument;
 
-use cuprate_consensus_rules::blocks::ContextToVerifyBlock;
+use cuprate_consensus_rules::{
+    blocks::{ContextToVerifyBlock, PENALTY_FREE_ZONE_5},
+    miner_tx::calculate_block_reward,
+};
 use cuprate_helper::cast::{u64_to_usize, usize_to_u64};
 use cuprate_types::{
     blockchain::{BlockchainReadRequest, BlockchainResponse},
@@ -27,6 +33,11 @@ use crate::{
     BlockChainContextRequest, BlockChainContextResponse, BlockchainContext, ContextCacheError,
     ContextConfig, Database, BLOCKCHAIN_TIMESTAMP_CHECK_WINDOW,
 };
+
+const DYNAMIC_FEE_ESTIMATE_GRACE_BLOCK_LIMIT: u64 = 100;
+const DYNAMIC_FEE_REFERENCE_TRANSACTION_WEIGHT: u128 = 3_000;
+const SCALING_2021_FEE_ROUNDING_PLACES: usize = 2;
+const FEE_QUANTIZATION_MASK: u64 = 10_u64.pow(4);
 
 /// A request from the context service to the context task.
 pub(super) struct ContextTaskRequest {
@@ -329,9 +340,15 @@ impl<D: Database + Clone + Send + 'static> ContextTask<D> {
                     window: state.config.window.try_into().unwrap(),
                 })
             }
-            BlockChainContextRequest::FeeEstimate { .. }
-            | BlockChainContextRequest::AltChains
-            | BlockChainContextRequest::CalculatePow { .. } => {
+            BlockChainContextRequest::FeeEstimate { grace_blocks } => {
+                BlockChainContextResponse::FeeEstimate(calculate_fee_estimate(
+                    &self.weight_cache,
+                    self.hardfork_state.current_hardfork(),
+                    self.already_generated_coins,
+                    grace_blocks,
+                )?)
+            }
+            BlockChainContextRequest::AltChains | BlockChainContextRequest::CalculatePow { .. } => {
                 todo!("finish https://github.com/Cuprate/cuprate/pull/297")
             }
         })
@@ -373,5 +390,151 @@ fn blockchain_context(
         cumulative_difficulty: difficulty_cache.cumulative_difficulty(),
         median_long_term_weight: weight_cache.median_long_term_weight(),
         top_block_timestamp: difficulty_cache.top_block_timestamp(),
+    }
+}
+
+fn calculate_fee_estimate(
+    weight_cache: &BlockWeightsCache,
+    current_hf: HardFork,
+    already_generated_coins: u64,
+    grace_blocks: u64,
+) -> Result<cuprate_types::rpc::FeeEstimate, tower::BoxError> {
+    if grace_blocks > DYNAMIC_FEE_ESTIMATE_GRACE_BLOCK_LIMIT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("grace_blocks must be <= {DYNAMIC_FEE_ESTIMATE_GRACE_BLOCK_LIMIT}"),
+        )
+        .into());
+    }
+
+    let grace_blocks = u64_to_usize(grace_blocks);
+
+    let mlw_penalty_free_zone_for_wallet = max(
+        usize_to_u64(weight_cache.projected_median_long_term_weight(grace_blocks)),
+        usize_to_u64(PENALTY_FREE_ZONE_5),
+    );
+
+    let msw_effective_short_term_median = max(
+        usize_to_u64(weight_cache.projected_median_short_term_weight(grace_blocks)),
+        mlw_penalty_free_zone_for_wallet,
+    );
+
+    let mnw = min(
+        msw_effective_short_term_median,
+        mlw_penalty_free_zone_for_wallet.saturating_mul(50),
+    );
+
+    let base_reward = calculate_block_reward(
+        1,
+        weight_cache.median_for_block_reward(current_hf),
+        already_generated_coins,
+        current_hf,
+    );
+
+    let fees =
+        dynamic_base_fee_estimate_2021_scaling(base_reward, mnw, mlw_penalty_free_zone_for_wallet);
+
+    Ok(cuprate_types::rpc::FeeEstimate {
+        fee: fees[0],
+        fees,
+        quantization_mask: FEE_QUANTIZATION_MASK,
+    })
+}
+
+fn dynamic_base_fee_estimate_2021_scaling(base_reward: u64, mnw: u64, mlw: u64) -> Vec<u64> {
+    let mfw = min(mnw, mlw);
+    let mfw = u128::from(mfw);
+    let mnw = u128::from(mnw);
+    let penalty_free_zone_5 = u128::from(usize_to_u64(PENALTY_FREE_ZONE_5));
+
+    let fl = u128::from(base_reward) * DYNAMIC_FEE_REFERENCE_TRANSACTION_WEIGHT / (mfw * mfw);
+    let fn_ = 4 * u128::from(base_reward) * DYNAMIC_FEE_REFERENCE_TRANSACTION_WEIGHT / (mfw * mfw);
+    let fm = 16 * u128::from(base_reward) * DYNAMIC_FEE_REFERENCE_TRANSACTION_WEIGHT
+        / (penalty_free_zone_5 * mfw);
+    let fh = max(
+        4 * fm,
+        4 * fm * mfw / (32 * DYNAMIC_FEE_REFERENCE_TRANSACTION_WEIGHT * mnw / penalty_free_zone_5),
+    );
+
+    vec![
+        round_money_up(fl as u64, SCALING_2021_FEE_ROUNDING_PLACES),
+        round_money_up(fn_ as u64, SCALING_2021_FEE_ROUNDING_PLACES),
+        round_money_up(fm as u64, SCALING_2021_FEE_ROUNDING_PLACES),
+        round_money_up(fh as u64, SCALING_2021_FEE_ROUNDING_PLACES),
+    ]
+}
+
+fn round_money_up(amount: u64, significant_digits: usize) -> u64 {
+    assert!(significant_digits > 0, "significant_digits must not be 0");
+
+    let mut digits = amount.to_string().into_bytes();
+
+    if digits.len() > significant_digits {
+        let mut bump = false;
+
+        for digit in digits.iter_mut().skip(significant_digits) {
+            if *digit != b'0' {
+                bump = true;
+                *digit = b'0';
+            }
+        }
+
+        let mut idx = significant_digits;
+        while bump && idx > 0 {
+            idx -= 1;
+            if digits[idx] == b'9' {
+                digits[idx] = b'0';
+            } else {
+                digits[idx] += 1;
+                bump = false;
+            }
+        }
+
+        if bump {
+            digits.insert(0, b'1');
+        }
+    }
+
+    std::str::from_utf8(&digits)
+        .expect("rounded amount digits should remain valid UTF-8")
+        .parse()
+        .expect("rounded amount digits should remain valid u64")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dynamic_base_fee_estimate_2021_scaling, round_money_up};
+
+    #[test]
+    fn fee_estimate_matches_monero_scaling_vectors() {
+        assert_eq!(
+            dynamic_base_fee_estimate_2021_scaling(600_000_000_000, 300_000, 300_000),
+            vec![20_000, 80_000, 320_000, 4_000_000]
+        );
+        assert_eq!(
+            dynamic_base_fee_estimate_2021_scaling(600_000_000_000, 15_000_000, 300_000),
+            vec![20_000, 80_000, 320_000, 1_300_000]
+        );
+        assert_eq!(
+            dynamic_base_fee_estimate_2021_scaling(600_000_000_000, 1_425_000, 1_425_000),
+            vec![890, 3_600, 68_000, 850_000]
+        );
+        assert_eq!(
+            dynamic_base_fee_estimate_2021_scaling(600_000_000_000, 1_500_000, 1_500_000),
+            vec![800, 3_200, 64_000, 800_000]
+        );
+        assert_eq!(
+            dynamic_base_fee_estimate_2021_scaling(600_000_000_000, 75_000_000, 1_500_000),
+            vec![800, 3_200, 64_000, 260_000]
+        );
+    }
+
+    #[test]
+    fn round_money_up_matches_monero_examples() {
+        assert_eq!(round_money_up(27_810, 3), 27_900);
+        assert_eq!(round_money_up(27_810, 2), 28_000);
+        assert_eq!(round_money_up(999, 2), 1_000);
+        assert_eq!(round_money_up(1_999_999, 1), 2_000_000);
+        assert_eq!(round_money_up(2_000_001, 6), 2_000_010);
     }
 }
