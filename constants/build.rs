@@ -4,9 +4,25 @@ fn main() {
 
 /// This sets the git `COMMIT` environment variable.
 fn set_commit_env() {
-    const PATH: &str = "../.git/refs/heads/";
-
-    println!("cargo:rerun-if-changed={PATH}");
+    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+    // A detached checkout changes HEAD, not refs/heads. Resolve Git's paths
+    // rather than assuming .git is a directory (it is a file in worktrees).
+    if std::env::var_os("GITHUB_SHA").is_none() {
+        for name in ["HEAD", "refs/heads", "packed-refs"] {
+            let output = std::process::Command::new("git")
+                .args(["rev-parse", "--git-path", name])
+                .output()
+                .expect("git must be available when building Cuprate");
+            assert!(output.status.success(), "could not locate Git metadata");
+            let path = String::from_utf8(output.stdout).unwrap();
+            let path = path.trim();
+            // Watching a nonexistent optional packed-refs file would rebuild on
+            // every invocation; a later pack also changes the watched refs dir.
+            if std::path::Path::new(path).exists() {
+                println!("cargo:rerun-if-changed={path}");
+            }
+        }
+    }
 
     let commit = if let Ok(t) = std::env::var("GITHUB_SHA") {
         t
