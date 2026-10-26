@@ -14,8 +14,8 @@
 //
 
 //! This module defines the addresses that will get passed around the
-//! Monero network. Core Monero has 4 main addresses: IPv4, IPv6, Tor,
-//! I2p. Currently this module only has IPv(4/6).
+//! Monero network. Core Monero has four main address types: IPv4, IPv6,
+//! Tor, and I2P. I2P addresses are represented as base32 destinations.
 //!
 use std::{hash::Hash, net, net::SocketAddr};
 
@@ -26,6 +26,8 @@ use cuprate_epee_encoding::EpeeObject;
 mod epee_builder;
 use epee_builder::*;
 
+mod i2p_addr;
+pub use i2p_addr::*;
 mod onion_addr;
 pub use onion_addr::*;
 
@@ -42,6 +44,7 @@ pub enum NetZone {
 pub enum NetworkAddress {
     Clear(SocketAddr),
     Tor(OnionAddr),
+    I2p(I2pAddr),
 }
 
 impl EpeeObject for NetworkAddress {
@@ -61,6 +64,7 @@ impl NetworkAddress {
         match self {
             Self::Clear(_) => NetZone::Public,
             Self::Tor(_) => NetZone::Tor,
+            Self::I2p(_) => NetZone::I2p,
         }
     }
 
@@ -78,6 +82,7 @@ impl NetworkAddress {
         match self {
             Self::Clear(ip) => ip.port(),
             Self::Tor(addr) => addr.port(),
+            Self::I2p(addr) => addr.port(),
         }
     }
 }
@@ -112,7 +117,7 @@ impl TryFrom<NetworkAddress> for SocketAddr {
     fn try_from(value: NetworkAddress) -> Result<Self, Self::Error> {
         match value {
             NetworkAddress::Clear(addr) => Ok(addr),
-            NetworkAddress::Tor(_) => Err(NetworkAddressIncorrectZone),
+            NetworkAddress::Tor(_) | NetworkAddress::I2p(_) => Err(NetworkAddressIncorrectZone),
         }
     }
 }

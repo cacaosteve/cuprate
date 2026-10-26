@@ -1505,6 +1505,7 @@ dependencies = [
  "cuprate-pruning",
  "cuprate-rpc-interface",
  "cuprate-rpc-types",
+ "cuprate-test-utils",
  "cuprate-txpool",
  "cuprate-types",
  "cuprate-wire",

@@ -17,7 +17,7 @@ pub mod types;
 
 pub use error::TxPoolError;
 pub use free::transaction_blob_hash;
-pub use tx::TxEntry;
+pub use tx::{TxEntry, TxRelay};
 
 #[cfg(test)]
 mod test {

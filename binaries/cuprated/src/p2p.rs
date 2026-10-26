@@ -14,9 +14,9 @@ use cuprate_p2p::{config::TransportConfig, NetworkInterface, P2PConfig};
 use cuprate_p2p_core::{
     client::{InternalPeerID, PeerSyncCallback},
     transports::Tcp,
-    ClearNet, NetworkZone, Tor, Transport,
+    ClearNet, I2p, NetworkZone, Tor, Transport,
 };
-use cuprate_p2p_transport::{Daemon, Socks, SocksClientConfig};
+use cuprate_p2p_transport::{Daemon, I2pSocks, Socks, SocksClientConfig};
 use cuprate_txpool::service::TxpoolReadHandle;
 
 use crate::{
@@ -259,6 +259,53 @@ pub(crate) fn initialize_tor_p2p(
             if tx.send(tor_interface).is_err() {
                 tracing::warn!("Failed to deliver Tor router to dandelion pool.");
             }
+        }
+    });
+}
+
+/// Initialize the external-i2pd I2P P2P zone after clearnet synchronization.
+/// The zone is restricted to transaction relay; it does not participate in block sync.
+pub(crate) fn initialize_i2p_p2p(
+    launch_ctx: LaunchContext,
+    tx_handler: IncomingTxHandler,
+    interface_publisher: Sender<NetworkInterface<I2p>>,
+    dandelion_publisher: Sender<NetworkInterface<I2p>>,
+) {
+    tracing::info!("I2P P2P zone will start after sync.");
+
+    let task_executor = launch_ctx.task_executor.clone();
+    let shutdown_token = task_executor.cancellation_token();
+
+    task_executor.spawn(async move {
+        tokio::select! {
+            result = launch_ctx.blockchain.syncer().wait_for_synced() => {
+                if result.is_err() {
+                    tracing::info!("Not starting I2P P2P zone, syncer stopped");
+                    return;
+                }
+            }
+            () = shutdown_token.cancelled() => return,
+        }
+
+        tracing::info!("Starting I2P P2P zone.");
+        let config = launch_ctx.config.as_ref();
+        let Ok((i2p_interface, i2p_tx_handler_tx)) = start_zone_p2p::<I2p, I2pSocks>(
+            &launch_ctx.blockchain,
+            launch_ctx.txpool_read.clone(),
+            config.i2p_p2p_config(),
+            crate::i2p::transport_config(config),
+            None,
+        )
+        .await
+        .map_err(anyhow::Error::from_boxed)
+        .inspect_err(|error| tracing::error!("Failed to start I2P P2P zone: {error:#}")) else {
+            return;
+        };
+
+        drop(interface_publisher.send(i2p_interface.clone()));
+        drop(dandelion_publisher.send(i2p_interface));
+        if i2p_tx_handler_tx.send(tx_handler).is_err() {
+            tracing::warn!("Failed to send tx handler to I2P zone.");
         }
     });
 }

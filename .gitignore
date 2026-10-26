@@ -6,3 +6,4 @@ fast_sync_hashes.bin
 /books/user/Cuprated.toml
 fuzz/corpus
 fuzz/artifacts
+.DS_Store

@@ -13,7 +13,7 @@ use cuprate_p2p_core::{
     transports::{Tcp, TcpServerConfig},
     ClearNet, NetworkZone,
 };
-use cuprate_wire::OnionAddr;
+use cuprate_wire::{I2pAddr, OnionAddr};
 
 use super::{default::DefaultOrCustom, macros::config_struct};
 use crate::p2p::ProxySettings;
@@ -30,6 +30,10 @@ config_struct! {
         #[child = true]
         /// The tor-net P2P config.
         pub tor_net: TorNetConfig,
+
+        #[child = true]
+        /// The I2P P2P config. Experimental; block synchronization remains on clearnet.
+        pub i2p_net: I2pNetConfig,
 
         #[child = true]
         /// Block downloader config.
@@ -276,6 +280,171 @@ config_struct! {
     }
 }
 
+config_struct! {
+    /// Experimental I2P peer-to-peer configuration.
+    #[derive(Debug, Deserialize, Serialize, PartialEq)]
+    #[serde(deny_unknown_fields, default)]
+    pub struct I2pNetConfig {
+
+        /// Enable I2P transaction-relay peers after clearnet synchronization.
+        pub enabled: bool,
+
+        /// How transactions submitted locally are relayed. Incoming peer transactions
+        /// continue to use the normal relay policy.
+        pub local_tx_relay_mode: LocalTxRelayMode,
+
+        /// Accept I2P peers through an externally configured i2pd server tunnel.
+        /// The tunnel should forward to `listen_addr` and use the destination in `address`.
+        pub inbound_tunnel: bool,
+
+        /// This node's I2P base32 destination, without a local TCP port.
+        /// Leave empty unless `inbound_tunnel` is enabled.
+        pub address: OptionalI2pAddr,
+
+        /// Local i2pd SOCKS5 proxy used for outbound I2P peer connections.
+        pub socks_proxy: SocketAddr,
+
+        /// Local address and port targeted by the i2pd server tunnel.
+        pub listen_addr: SocketAddr,
+
+        /// Additional I2P seeds. No built-in I2P seeds are enabled in this prototype.
+        pub seed_nodes: Vec<I2pAddr>,
+
+        /// Number of outbound I2P connections to maintain.
+        pub outbound_connections: usize,
+
+        /// Extra outbound I2P connections to create under load.
+        pub extra_outbound_connections: usize,
+
+        /// Maximum number of inbound I2P connections.
+        pub max_inbound_connections: usize,
+
+        /// Fraction of outbound peers selected from the gray address book.
+        pub gray_peers_percent: f64,
+
+        #[child = true]
+        /// Address-book settings for I2P peers.
+        pub address_book_config: AddressBookConfig,
+    }
+}
+
+/// Relay policy for transactions submitted through this node's RPC interface.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalTxRelayMode {
+    /// Use the node's normal non-I2P route. If Tor is configured for local relay,
+    /// that existing preference is retained; otherwise transactions use clearnet.
+    #[default]
+    Clearnet,
+    /// Try to send over I2P first, falling back to the normal route if no I2P peer
+    /// is available or the I2P send fails.
+    I2pThenClearnet,
+    /// Keep local transactions private and retry over I2P until an I2P peer accepts
+    /// the transaction. Never fall back to the normal route.
+    I2pOnly,
+}
+
+/// Optional configured I2P address, represented as an empty string when unset so
+/// the generated TOML documentation can include the setting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OptionalI2pAddr(Option<I2pAddr>);
+
+impl OptionalI2pAddr {
+    pub const fn get(self) -> Option<I2pAddr> {
+        self.0
+    }
+}
+
+impl From<Option<I2pAddr>> for OptionalI2pAddr {
+    fn from(address: Option<I2pAddr>) -> Self {
+        Self(address)
+    }
+}
+
+impl Serialize for OptionalI2pAddr {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.0 {
+            Some(address) => serializer.serialize_str(&address.to_string()),
+            None => serializer.serialize_str(""),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OptionalI2pAddr {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let address = String::deserialize(deserializer)?;
+        if address.is_empty() {
+            Ok(Self(None))
+        } else {
+            address
+                .parse()
+                .map(Some)
+                .map(Self)
+                .map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+#[cfg(test)]
+mod i2p_config_tests {
+    use serde::{Deserialize, Serialize};
+
+    use super::{LocalTxRelayMode, OptionalI2pAddr};
+    use cuprate_wire::I2pAddr;
+
+    #[derive(Debug, Deserialize, PartialEq, Serialize)]
+    struct AddressConfig {
+        address: OptionalI2pAddr,
+    }
+
+    #[test]
+    fn optional_i2p_address_round_trips_through_toml() {
+        let expected: I2pAddr =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b32.i2p:18083"
+                .parse()
+                .unwrap();
+        let config: AddressConfig =
+            toml::from_str(&format!("address = {:?}", expected.to_string())).unwrap();
+
+        assert_eq!(config.address.get(), Some(expected));
+        let encoded = toml::to_string(&config).unwrap();
+        let decoded: AddressConfig = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.address.get(), Some(expected));
+    }
+
+    #[derive(Debug, Deserialize, Serialize, PartialEq)]
+    struct RelayModeConfig {
+        #[serde(default)]
+        local_tx_relay_mode: LocalTxRelayMode,
+    }
+
+    #[test]
+    fn local_tx_relay_mode_defaults_to_clearnet_and_parses_all_choices() {
+        let default: RelayModeConfig = toml::from_str("").unwrap();
+        assert_eq!(default.local_tx_relay_mode, LocalTxRelayMode::Clearnet);
+
+        for (value, expected) in [
+            ("clearnet", LocalTxRelayMode::Clearnet),
+            ("i2p_then_clearnet", LocalTxRelayMode::I2pThenClearnet),
+            ("i2p_only", LocalTxRelayMode::I2pOnly),
+        ] {
+            let parsed: RelayModeConfig =
+                toml::from_str(&format!("local_tx_relay_mode = {value:?}")).unwrap();
+            assert_eq!(parsed.local_tx_relay_mode, expected);
+            assert_eq!(
+                toml::from_str::<RelayModeConfig>(&toml::to_string(&parsed).unwrap()).unwrap(),
+                parsed
+            );
+        }
+    }
+}
+
 /// Gets the port to listen on for p2p connections.
 pub const fn p2p_port(setting: DefaultOrCustom<u16>, network: Network) -> u16 {
     match setting {
@@ -337,6 +506,25 @@ impl Default for TorNetConfig {
             outbound_connections: 12,
             extra_outbound_connections: 2,
             max_inbound_connections: 128,
+            gray_peers_percent: 0.3,
+            address_book_config: AddressBookConfig::default(),
+        }
+    }
+}
+
+impl Default for I2pNetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            local_tx_relay_mode: LocalTxRelayMode::Clearnet,
+            inbound_tunnel: false,
+            address: OptionalI2pAddr::default(),
+            socks_proxy: "127.0.0.1:4447".parse().unwrap(),
+            listen_addr: "127.0.0.1:18084".parse().unwrap(),
+            seed_nodes: Vec::new(),
+            outbound_connections: 4,
+            extra_outbound_connections: 1,
+            max_inbound_connections: 16,
             gray_peers_percent: 0.3,
             address_book_config: AddressBookConfig::default(),
         }

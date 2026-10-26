@@ -26,6 +26,7 @@ use crate::{
 pub fn add_transaction(
     tx: &TransactionVerificationData,
     state_stem: bool,
+    relay: crate::TxRelay,
     w: &mut fjall::OwnedWriteBatch,
     db: &TxpoolDatabase,
 ) -> Result<(), TxPoolWriteError> {
@@ -34,7 +35,7 @@ pub fn add_transaction(
     // Add the tx blob.
     w.insert(&db.tx_blobs, tx.tx_hash, &tx.tx_blob);
 
-    let mut flags = TxStateFlags::empty();
+    let mut flags = TxStateFlags::for_relay(relay);
     flags.set(TxStateFlags::STATE_STEM, state_stem);
 
     // Add the tx info.

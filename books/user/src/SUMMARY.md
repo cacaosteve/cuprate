@@ -12,6 +12,8 @@
 
 - [Configuration](config.md)
 
+- [I2P P2P (experimental)](networking/i2p.md)
+
 - [Command line](cli.md)
 
 - [Resources](resources/intro.md)

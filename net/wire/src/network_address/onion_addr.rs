@@ -150,7 +150,7 @@ impl TryFrom<NetworkAddress> for OnionAddr {
     fn try_from(value: NetworkAddress) -> Result<Self, Self::Error> {
         match value {
             NetworkAddress::Tor(addr) => Ok(addr),
-            NetworkAddress::Clear(_) => Err(NetworkAddressIncorrectZone),
+            NetworkAddress::Clear(_) | NetworkAddress::I2p(_) => Err(NetworkAddressIncorrectZone),
         }
     }
 }

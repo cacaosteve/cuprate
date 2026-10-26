@@ -25,7 +25,7 @@ use cuprate_p2p::constants::{
 };
 use cuprate_p2p_core::{
     client::{InternalPeerID, PeerInformation},
-    NetZoneAddress, ProtocolRequest, ProtocolResponse,
+    MessageID, NetZoneAddress, ProtocolRequest, ProtocolResponse,
 };
 use cuprate_txpool::service::TxpoolReadHandle;
 use cuprate_types::{
@@ -128,6 +128,23 @@ where
     }
 
     fn call(&mut self, request: ProtocolRequest) -> Self::Future {
+        let message_id = match &request {
+            ProtocolRequest::GetObjects(_) => MessageID::GetObjects,
+            ProtocolRequest::GetChain(_) => MessageID::GetChain,
+            ProtocolRequest::FluffyMissingTxs(_) => MessageID::FluffyMissingTxs,
+            ProtocolRequest::GetTxPoolCompliment(_) => MessageID::GetTxPoolCompliment,
+            ProtocolRequest::NewBlock(_) => MessageID::NewBlock,
+            ProtocolRequest::NewFluffyBlock(_) => MessageID::NewFluffyBlock,
+            ProtocolRequest::NewTransactions(_) => MessageID::NewTransactions,
+        };
+
+        if !protocol_message_allowed(A::IS_ANONYMITY_NETWORK, message_id) {
+            return ready(Err(anyhow::anyhow!(
+                "Protocol message {message_id:?} is not allowed over an anonymity network"
+            )))
+            .boxed();
+        }
+
         match request {
             ProtocolRequest::GetObjects(r) => {
                 get_objects(r, self.blockchain_read_handle.clone()).boxed()
@@ -423,7 +440,7 @@ where
 
     let addr = peer_information.id.into();
 
-    let anon_zone = matches!(addr, CrossNetworkInternalPeerId::Tor(_));
+    let anon_zone = A::IS_ANONYMITY_NETWORK;
 
     let state = if request.dandelionpp_fluff && !anon_zone {
         TxState::Fluff
@@ -456,5 +473,46 @@ where
             Ok(ProtocolResponse::NA)
         }
         Err(e) => Err(e.into()),
+    }
+}
+
+/// Monero's anonymity-network P2P mode is for transaction broadcasts, not block
+/// requests, block responses, or block propagation. Handshake and timed-sync admin
+/// messages are handled outside this protocol request handler.
+const fn anonymity_zone_allows_protocol_message(message: MessageID) -> bool {
+    matches!(message, MessageID::NewTransactions)
+}
+
+const fn protocol_message_allowed(is_anonymity_network: bool, message: MessageID) -> bool {
+    !is_anonymity_network || anonymity_zone_allows_protocol_message(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{anonymity_zone_allows_protocol_message, protocol_message_allowed};
+    use cuprate_p2p_core::MessageID;
+
+    #[test]
+    fn anonymity_zone_allows_only_transaction_broadcasts() {
+        assert!(anonymity_zone_allows_protocol_message(
+            MessageID::NewTransactions
+        ));
+        assert!(protocol_message_allowed(true, MessageID::NewTransactions));
+        assert!(protocol_message_allowed(false, MessageID::GetObjects));
+
+        for message in [
+            MessageID::GetObjects,
+            MessageID::GetChain,
+            MessageID::FluffyMissingTxs,
+            MessageID::GetTxPoolCompliment,
+            MessageID::NewBlock,
+            MessageID::NewFluffyBlock,
+        ] {
+            assert!(
+                !anonymity_zone_allows_protocol_message(message),
+                "{message:?} must not be allowed over an anonymity network"
+            );
+            assert!(!protocol_message_allowed(true, message));
+        }
     }
 }

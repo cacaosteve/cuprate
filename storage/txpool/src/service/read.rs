@@ -29,6 +29,87 @@ use crate::{
     TxEntry,
 };
 
+#[cfg(test)]
+mod relay_tests {
+    use super::*;
+    use crate::{ops, TxRelay};
+    use cuprate_test_utils::data::TX_V2_RCT3;
+
+    #[test]
+    fn origin_and_policy_survive_database_reopen() {
+        for relay in [
+            TxRelay::Unknown,
+            TxRelay::Peer,
+            TxRelay::Local,
+            TxRelay::LocalI2pThenClearnet,
+            TxRelay::LocalI2pClearnet,
+            TxRelay::LocalI2pOnly,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let tx: cuprate_types::TransactionVerificationData =
+                TX_V2_RCT3.clone().try_into().unwrap();
+            {
+                let db = TxpoolDatabase::open_with_database(
+                    fjall::Database::builder(directory.path()).open().unwrap(),
+                )
+                .unwrap();
+                let mut batch = db.fjall_database.batch();
+                ops::add_transaction(&tx, true, relay, &mut batch, &db).unwrap();
+                batch.commit().unwrap();
+                db.fjall_database
+                    .persist(fjall::PersistMode::SyncAll)
+                    .unwrap();
+            }
+            let db = TxpoolDatabase::open_with_database(
+                fjall::Database::builder(directory.path()).open().unwrap(),
+            )
+            .unwrap();
+            let TxpoolReadResponse::TxBlob {
+                tx_blob: blob,
+                state_stem,
+                relay: stored,
+            } = tx_blob(&db, &tx.tx_hash).unwrap()
+            else {
+                panic!("wrong response")
+            };
+            assert_eq!(stored, relay);
+            assert!(state_stem);
+            assert_eq!(blob, tx.tx_blob);
+            let TxpoolReadResponse::Backlog(txs) = backlog(&db).unwrap() else {
+                panic!("wrong response")
+            };
+            assert_eq!(txs.len(), 1);
+            assert_eq!(txs[0].relay, relay);
+            assert!(txs[0].private);
+        }
+    }
+
+    #[test]
+    fn relay_flags_preserve_record_layout_and_survive_promotion() {
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            size_of::<TransactionInfo>(),
+            72,
+            "no txpool schema size change"
+        );
+        // Legacy records with only the original bits never become inferred local transactions.
+        assert_eq!(TxStateFlags::STATE_STEM.relay(), TxRelay::Unknown);
+        for relay in [
+            TxRelay::Peer,
+            TxRelay::Local,
+            TxRelay::LocalI2pThenClearnet,
+            TxRelay::LocalI2pClearnet,
+            TxRelay::LocalI2pOnly,
+        ] {
+            let mut flags = TxStateFlags::for_relay(relay) | TxStateFlags::STATE_STEM;
+            flags.insert(TxStateFlags::DOUBLE_SPENT);
+            flags.remove(TxStateFlags::STATE_STEM);
+            assert_eq!(flags.relay(), relay);
+            assert!(!flags.private());
+        }
+    }
+}
+
 /// The txpool [`Service`] read handle.
 #[derive(Clone)]
 pub struct TxpoolReadHandle {
@@ -145,9 +226,15 @@ fn tx_blob(
         .ok_or(TxPoolError::NotFound)?
         .to_vec();
 
+    let info = snapshot
+        .get(&db.tx_infos, tx_hash)?
+        .ok_or(TxPoolError::NotFound)?;
+    let info: TransactionInfo = bytemuck::pod_read_unaligned(info.as_ref());
+
     Ok(TxpoolReadResponse::TxBlob {
         tx_blob,
-        state_stem: in_stem_pool(tx_hash, &snapshot, db)?,
+        state_stem: info.flags.private(),
+        relay: info.flags.relay(),
     })
 }
 
@@ -250,6 +337,7 @@ fn backlog(db: &TxpoolDatabase) -> Result<TxpoolReadResponse, TxPoolError> {
                 weight: tx_info.weight,
                 fee: tx_info.fee,
                 private: tx_info.flags.private(),
+                relay: tx_info.flags.relay(),
                 received_at: tx_info.received_at,
             })
         })

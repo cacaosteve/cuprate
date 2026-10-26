@@ -10,6 +10,8 @@ use monero_oxide::transaction::Timelock;
 
 use cuprate_types::{CachedVerificationState, HardFork};
 
+use crate::TxRelay;
+
 /// An inputs key image.
 pub type KeyImage = [u8; 32];
 
@@ -28,10 +30,49 @@ bitflags::bitflags! {
         const STATE_STEM   = 0b0000_0001;
         /// A flag for if we have seen another tx double spending this tx.
         const DOUBLE_SPENT = 0b0000_0010;
+        /// Origin/policy metadata is present (absent in legacy records).
+        const ORIGIN_KNOWN = 0b0000_0100;
+        const LOCAL       = 0b0000_1000;
+        const I2P_FIRST   = 0b0001_0000;
+        const I2P_ONLY    = 0b0010_0000;
+        const CLEARNET_FALLBACK = 0b0100_0000;
     }
 }
 
 impl TxStateFlags {
+    /// Decode origin metadata without altering the on-disk record layout.
+    pub const fn relay(self) -> TxRelay {
+        if !self.contains(Self::ORIGIN_KNOWN) {
+            TxRelay::Unknown
+        } else if !self.contains(Self::LOCAL) {
+            TxRelay::Peer
+        } else if self.contains(Self::I2P_ONLY) {
+            TxRelay::LocalI2pOnly
+        } else if self.contains(Self::I2P_FIRST) {
+            if self.contains(Self::CLEARNET_FALLBACK) {
+                TxRelay::LocalI2pClearnet
+            } else {
+                TxRelay::LocalI2pThenClearnet
+            }
+        } else {
+            TxRelay::Local
+        }
+    }
+
+    /// Encode origin metadata in previously unused flag bits.
+    pub fn for_relay(relay: TxRelay) -> Self {
+        match relay {
+            TxRelay::Unknown => Self::empty(),
+            TxRelay::Peer => Self::ORIGIN_KNOWN,
+            TxRelay::Local => Self::ORIGIN_KNOWN | Self::LOCAL,
+            TxRelay::LocalI2pThenClearnet => Self::ORIGIN_KNOWN | Self::LOCAL | Self::I2P_FIRST,
+            TxRelay::LocalI2pClearnet => {
+                Self::ORIGIN_KNOWN | Self::LOCAL | Self::I2P_FIRST | Self::CLEARNET_FALLBACK
+            }
+            TxRelay::LocalI2pOnly => Self::ORIGIN_KNOWN | Self::LOCAL | Self::I2P_ONLY,
+        }
+    }
+
     pub const fn private(&self) -> bool {
         self.contains(Self::STATE_STEM)
     }

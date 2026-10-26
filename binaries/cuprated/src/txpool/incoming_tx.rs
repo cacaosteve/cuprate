@@ -16,23 +16,24 @@ use cuprate_consensus::{
     BlockchainContextService, VerificationContext,
 };
 use cuprate_dandelion_tower::{
-    pool::{DandelionPoolService, IncomingTxBuilder},
+    pool::{DandelionPoolService, IncomingTxBuilder, LocalTxEmbargoPolicy},
     State, TxState,
 };
 use cuprate_helper::asynch::rayon_spawn_async;
 use cuprate_p2p::NetworkInterface;
-use cuprate_p2p_core::{ClearNet, Tor};
+use cuprate_p2p_core::{ClearNet, I2p, Tor};
 use cuprate_txpool::{
     service::{
         interface::{TxpoolReadRequest, TxpoolReadResponse},
         TxpoolReadHandle, TxpoolWriteHandle,
     },
-    transaction_blob_hash, TxPoolError,
+    transaction_blob_hash, TxPoolError, TxRelay,
 };
 use cuprate_types::TransactionVerificationData;
 
 use crate::{
     blockchain::ConsensusBlockchainReadHandle,
+    config::LocalTxRelayMode,
     p2p::CrossNetworkInternalPeerId,
     txpool::{
         dandelion::{self, DiffuseService, MainDandelionRouter},
@@ -62,10 +63,23 @@ pub(crate) struct IncomingTxs {
 
 ///  The transaction type used for dandelion++.
 #[derive(Clone)]
-pub(crate) struct DandelionTx(pub Bytes);
+pub(crate) struct DandelionTx(pub Bytes, pub TxRelay);
+
+impl DandelionTx {
+    pub(super) const fn embargo_policy(&self) -> LocalTxEmbargoPolicy {
+        if self.1.retry_local() {
+            LocalTxEmbargoPolicy::RetryLocal
+        } else {
+            LocalTxEmbargoPolicy::Fluff
+        }
+    }
+}
 
 /// A transaction ID/hash.
 pub(super) type TxId = [u8; 32];
+
+#[cfg(test)]
+mod tests;
 
 /// The service than handles incoming transaction pool transactions.
 ///
@@ -96,16 +110,25 @@ impl IncomingTxHandler {
         launch_ctx: &LaunchContext,
         clear_net: NetworkInterface<ClearNet>,
         tor_net_rx: Option<oneshot::Receiver<NetworkInterface<Tor>>>,
+        i2p_net_rx: oneshot::Receiver<NetworkInterface<I2p>>,
         txpool_write_handle: TxpoolWriteHandle,
     ) -> anyhow::Result<Self> {
         let txpool_config = launch_ctx.config.storage.txpool.clone();
+        let local_tx_relay_mode = launch_ctx.config.p2p.i2p_net.local_tx_relay_mode;
+        if local_tx_relay_mode != LocalTxRelayMode::Clearnet
+            && (launch_ctx.config.offline || !launch_ctx.config.p2p.i2p_net.enabled)
+        {
+            anyhow::bail!(
+                "a non-clearnet p2p.i2p_net.local_tx_relay_mode requires p2p.i2p_net.enabled = true and offline = false"
+            );
+        }
 
         let diffuse_service = DiffuseService {
             clear_net_broadcast_service: clear_net.broadcast_svc(),
         };
         let clearnet_router = dandelion::dandelion_router(clear_net);
 
-        let dandelion_router = MainDandelionRouter::new(clearnet_router, tor_net_rx);
+        let dandelion_router = MainDandelionRouter::new(clearnet_router, tor_net_rx, i2p_net_rx);
 
         let (promote_tx, promote_rx) = mpsc::unbounded_channel();
 
@@ -113,6 +136,7 @@ impl IncomingTxHandler {
             dandelion::start_dandelion_pool_manager(
                 dandelion_router,
                 launch_ctx.txpool_read.clone(),
+                txpool_write_handle.clone(),
                 promote_tx,
             );
 
@@ -138,6 +162,7 @@ impl IncomingTxHandler {
             dandelion_pool_manager.clone(),
             txpool_config,
             launch_ctx.task_executor.clone(),
+            local_tx_relay_mode,
         )
         .await
         .map_err(anyhow::Error::from_boxed)?;
@@ -356,13 +381,17 @@ async fn rerelay_stem_tx(
         CrossNetworkInternalPeerId,
     >,
 ) -> Result<(), IncomingTxError> {
-    let tx_blob = match txpool_read_handle
+    let (tx_blob, state_stem, relay) = match txpool_read_handle
         .ready()
         .await?
         .call(TxpoolReadRequest::TxBlob(*tx_hash))
         .await
     {
-        Ok(TxpoolReadResponse::TxBlob { tx_blob, .. }) => tx_blob,
+        Ok(TxpoolReadResponse::TxBlob {
+            tx_blob,
+            state_stem,
+            relay,
+        }) => (tx_blob, state_stem, relay),
         Ok(_) => unreachable!(),
         Err(TxPoolError::NotFound) => {
             // The tx was dropped from the pool
@@ -371,8 +400,18 @@ async fn rerelay_stem_tx(
         Err(e) => return Err(e.into()),
     };
 
-    let incoming_tx =
-        IncomingTxBuilder::new(DandelionTx(Bytes::copy_from_slice(&tx_blob)), *tx_hash);
+    // Storage is authoritative, including during startup and concurrent peer echoes.
+    if !state_stem || relay == TxRelay::Unknown {
+        return Ok(());
+    }
+    if relay.retry_local() && state != TxState::Local {
+        // An echo is not a new local submission or an embargo retry. Do not let
+        // peers trigger extra sends (or an I2P-first fallback) for our queued tx.
+        return Ok(());
+    }
+    let tx = DandelionTx(Bytes::from(tx_blob), relay);
+    let policy = tx.embargo_policy();
+    let incoming_tx = IncomingTxBuilder::new(tx, *tx_hash).with_local_tx_embargo_policy(policy);
 
     let incoming_tx = incoming_tx
         .with_routing_state(state)

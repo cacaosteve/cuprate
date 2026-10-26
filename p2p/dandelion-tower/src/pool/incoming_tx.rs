@@ -9,6 +9,7 @@ pub struct IncomingTx<Tx, TxId, PeerId> {
     pub(crate) tx_id: TxId,
     /// The routing state of the transaction.
     pub(crate) routing_state: TxState<PeerId>,
+    pub(crate) local_embargo_policy: Option<super::LocalTxEmbargoPolicy>,
 }
 
 /// An [`IncomingTx`] builder.
@@ -26,6 +27,7 @@ pub struct IncomingTxBuilder<const RS: bool, const DBS: bool, Tx, TxId, PeerId> 
     routing_state: Option<TxState<PeerId>>,
     /// The state of this transaction in the DB.
     state_in_db: Option<State>,
+    local_embargo_policy: Option<super::LocalTxEmbargoPolicy>,
 }
 
 impl<Tx, TxId, PeerId> IncomingTxBuilder<false, false, Tx, TxId, PeerId> {
@@ -36,6 +38,7 @@ impl<Tx, TxId, PeerId> IncomingTxBuilder<false, false, Tx, TxId, PeerId> {
             tx_id,
             routing_state: None,
             state_in_db: None,
+            local_embargo_policy: None,
         }
     }
 }
@@ -53,6 +56,7 @@ impl<const DBS: bool, Tx, TxId, PeerId> IncomingTxBuilder<false, DBS, Tx, TxId, 
             tx_id: self.tx_id,
             routing_state: Some(state),
             state_in_db: self.state_in_db,
+            local_embargo_policy: self.local_embargo_policy,
         }
     }
 }
@@ -70,7 +74,22 @@ impl<const RS: bool, Tx, TxId, PeerId> IncomingTxBuilder<RS, false, Tx, TxId, Pe
             tx_id: self.tx_id,
             routing_state: self.routing_state,
             state_in_db: state,
+            local_embargo_policy: self.local_embargo_policy,
         }
+    }
+}
+
+impl<const RS: bool, const DBS: bool, Tx, TxId, PeerId>
+    IncomingTxBuilder<RS, DBS, Tx, TxId, PeerId>
+{
+    /// Override the default embargo policy with this transaction's persisted policy.
+    #[must_use]
+    pub const fn with_local_tx_embargo_policy(
+        mut self,
+        policy: super::LocalTxEmbargoPolicy,
+    ) -> Self {
+        self.local_embargo_policy = Some(policy);
+        self
     }
 }
 
@@ -90,6 +109,7 @@ impl<Tx, TxId, PeerId> IncomingTxBuilder<true, true, Tx, TxId, PeerId> {
             tx: self.tx,
             tx_id: self.tx_id,
             routing_state,
+            local_embargo_policy: self.local_embargo_policy,
         })
     }
 }

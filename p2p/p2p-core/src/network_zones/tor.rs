@@ -18,6 +18,8 @@ use cuprate_wire::network_address::OnionAddr;
 use crate::{NetZoneAddress, NetworkZone};
 
 impl NetZoneAddress for OnionAddr {
+    const IS_ANONYMITY_NETWORK: bool = true;
+
     type BanID = [u8; 56];
 
     fn set_port(&mut self, port: u16) {

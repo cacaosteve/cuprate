@@ -31,6 +31,9 @@ enum OutboundConnectorError {
     NoAvailablePeers,
 }
 
+#[cfg(test)]
+mod tests;
+
 /// A request from the peer set to make an outbound connection.
 ///
 /// This will only be sent when the peer set is under load from the rest of Cuprate or the peer
@@ -77,13 +80,16 @@ where
     C::Future: Send + 'static,
 {
     pub fn new(
-        config: P2PConfig<Z>,
+        mut config: P2PConfig<Z>,
         new_peers_tx: mpsc::Sender<Client<Z>>,
         make_connection_rx: mpsc::Receiver<MakeConnectionRequest>,
         address_book_svc: A,
         connector_svc: C,
         peer_sync_callback: Option<PeerSyncCallback>,
     ) -> Self {
+        config
+            .seeds
+            .retain(|address| !config.address_book_config.is_own_address(address));
         let peer_type_gen = Bernoulli::new(config.gray_peers_percent)
             .expect("Gray peer percent is incorrect should be 0..=1");
 
@@ -108,7 +114,10 @@ where
             .seeds
             .choose_multiple(&mut thread_rng(), MAX_SEED_CONNECTIONS);
 
-        assert_ne!(seeds.len(), 0, "No seed nodes available to get peers from");
+        if seeds.len() == 0 {
+            tracing::warn!("No eligible seed nodes available; waiting for peer discovery");
+            return Err(OutboundConnectorError::NoAvailablePeers);
+        }
 
         let mut allowed_errors = seeds.len();
 
@@ -161,6 +170,10 @@ where
     /// Connects to a given outbound peer.
     #[instrument(level = "info", skip_all)]
     async fn connect_to_outbound_peer(&mut self, permit: OwnedSemaphorePermit, addr: Z::Addr) {
+        if self.config.address_book_config.is_own_address(&addr) {
+            tracing::warn!("Refusing outbound connection to our own destination");
+            return;
+        }
         let new_peers_tx = self.new_peers_tx.clone();
         let peer_sync_callback = self.peer_sync_callback.clone();
         let connection_fut = self

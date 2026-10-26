@@ -14,6 +14,9 @@ pub struct TxpoolDatabase {
     pub(crate) metadata: fjall::Keyspace,
 
     pub(crate) in_progress_key_images: Mutex<HashMap<[u8; 32], [u8; 32]>>,
+    /// Serialize txpool writes so a relay-state update cannot resurrect metadata
+    /// concurrently removed by block inclusion or eviction. Readers remain concurrent.
+    pub(crate) write_lock: Mutex<()>,
 }
 
 impl TxpoolDatabase {
@@ -35,6 +38,7 @@ impl TxpoolDatabase {
             metadata: fjall_database.keyspace("metadata", KeyspaceCreateOptions::default)?,
             fjall_database,
             in_progress_key_images: Mutex::new(HashMap::new()),
+            write_lock: Mutex::new(()),
         };
 
         Ok(s)

@@ -38,10 +38,26 @@ pub struct AddressBookConfig<Z: NetworkZone> {
     pub our_own_address: Option<Z::Addr>,
 }
 
+impl<Z: NetworkZone> AddressBookConfig<Z> {
+    /// Detect our own destination even when anonymity-network gossip changes its port.
+    /// Peer IDs are intentionally not unique on these networks.
+    pub fn is_own_address(&self, address: &Z::Addr) -> bool {
+        self.our_own_address.is_some_and(|own| {
+            if Z::Addr::IS_ANONYMITY_NETWORK {
+                own.ban_id() == address.ban_id()
+            } else {
+                own == *address
+            }
+        })
+    }
+}
+
 /// Possible errors when dealing with the address book.
 /// This is boxed when returning an error in the [`tower::Service`].
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
 pub enum AddressBookError {
+    #[error("Refusing a connection to this node's own destination")]
+    OwnAddress,
     /// The peer is already connected.
     #[error("Peer is already connected")]
     PeerAlreadyConnected,

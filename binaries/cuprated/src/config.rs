@@ -16,7 +16,7 @@ use cuprate_helper::{
     network::Network,
 };
 use cuprate_p2p::block_downloader::BlockDownloaderConfig;
-use cuprate_p2p_core::{ClearNet, Tor};
+use cuprate_p2p_core::{ClearNet, I2p, Tor};
 use cuprate_wire::OnionAddr;
 
 use crate::tor::{TorContext, TorMode};
@@ -39,7 +39,7 @@ mod macros;
 
 use default::DefaultOrCustom;
 use fs::FileSystemConfig;
-pub use p2p::{p2p_port, P2PConfig};
+pub use p2p::{p2p_port, I2pNetConfig, LocalTxRelayMode, OptionalI2pAddr, P2PConfig};
 use rayon::RayonConfig;
 pub use rpc::{restricted_rpc_port, unrestricted_rpc_port, RpcConfig};
 pub use storage::{StorageConfig, TxpoolConfig};
@@ -348,6 +348,39 @@ impl Config {
                 &self.fs.cache_directory,
                 self.network,
                 our_onion_address,
+            ),
+        }
+    }
+
+    /// The [`I2p`], [`cuprate_p2p::P2PConfig`]. I2P is used only for transaction relay.
+    pub fn i2p_p2p_config(&self) -> cuprate_p2p::P2PConfig<I2p> {
+        let i2p = &self.p2p.i2p_net;
+        let address = i2p.address.get();
+        let inbound_enabled = i2p.inbound_tunnel && address.is_some();
+        if i2p.inbound_tunnel && address.is_none() {
+            tracing::warn!("I2P inbound is enabled but no advertised I2P address was configured; inbound service disabled.");
+        }
+
+        cuprate_p2p::P2PConfig {
+            network: self.network,
+            seeds: i2p.seed_nodes.clone(),
+            offline: self.offline,
+            outbound_connections: i2p.outbound_connections,
+            extra_outbound_connections: i2p.extra_outbound_connections,
+            max_inbound_connections: if inbound_enabled {
+                i2p.max_inbound_connections
+            } else {
+                0
+            },
+            gray_peers_percent: i2p.gray_peers_percent,
+            // Anonymous peers cannot ping back a TCP address. The I2P destination
+            // is advertised through this zone's peer list, not `my_port`.
+            p2p_port: 0,
+            rpc_port: 0,
+            address_book_config: i2p.address_book_config.address_book_config(
+                &self.fs.cache_directory,
+                self.network,
+                if inbound_enabled { address } else { None },
             ),
         }
     }

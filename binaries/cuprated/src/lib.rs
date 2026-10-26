@@ -34,6 +34,7 @@ pub mod logging;
 pub mod monitor;
 pub mod version;
 
+mod i2p;
 mod p2p;
 mod rpc;
 mod tor;
@@ -47,7 +48,7 @@ use tower::{Service, ServiceExt};
 use tracing::error;
 
 use cuprate_p2p::NetworkInterface;
-use cuprate_p2p_core::{ClearNet, Tor};
+use cuprate_p2p_core::{ClearNet, I2p, Tor};
 use cuprate_txpool::service::TxpoolReadHandle;
 use cuprate_types::blockchain::BlockchainWriteRequest;
 
@@ -106,6 +107,9 @@ pub struct Node {
 
     /// Tor P2P interface (available after sync).
     pub tor: Option<oneshot::Receiver<NetworkInterface<Tor>>>,
+
+    /// I2P P2P interface (available after sync).
+    pub i2p: Option<oneshot::Receiver<NetworkInterface<I2p>>>,
 
     /// The configuration this node was launched with.
     pub config: Arc<Config>,
@@ -221,12 +225,15 @@ impl Node {
 
             // Create Tor router delivery channel.
             let (tor_router_tx, tor_router_rx) = tor_enabled.then(oneshot::channel).unzip();
+            let i2p_enabled = !launch_ctx.config.offline && launch_ctx.config.p2p.i2p_net.enabled;
+            let (i2p_router_tx, i2p_router_rx) = oneshot::channel();
 
             // Create the incoming tx handler service.
             let tx_handler = IncomingTxHandler::init(
                 &launch_ctx,
                 clearnet_interface.clone(),
                 tor_router_rx,
+                i2p_router_rx,
                 txpool_write_handle,
             )
             .await?;
@@ -240,6 +247,7 @@ impl Node {
 
             // Tor interface channel - populated when Tor starts after sync.
             let (tor_tx, tor_rx) = oneshot::channel();
+            let (i2p_tx, i2p_rx) = oneshot::channel();
 
             // Initialize the blockchain manager.
             blockchain::init_blockchain_manager(
@@ -260,10 +268,14 @@ impl Node {
                 p2p::initialize_tor_p2p(
                     launch_ctx.clone(),
                     tor_context,
-                    tx_handler,
+                    tx_handler.clone(),
                     tor_tx,
                     tor_router_tx,
                 );
+            }
+
+            if i2p_enabled {
+                p2p::initialize_i2p_p2p(launch_ctx.clone(), tx_handler, i2p_tx, i2p_router_tx);
             }
 
             let LaunchContext {
@@ -279,6 +291,7 @@ impl Node {
                 txpool: txpool_read,
                 clearnet: clearnet_interface,
                 tor: if tor_enabled { Some(tor_rx) } else { None },
+                i2p: if i2p_enabled { Some(i2p_rx) } else { None },
                 config,
                 task_executor,
             })

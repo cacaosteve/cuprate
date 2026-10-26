@@ -25,5 +25,8 @@ tor-hsservice   = { workspace = true, optional = true }
 tor-proto       = { workspace = true, optional = true }
 tor-rtcompat    = { workspace = true, optional = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread"] }
+
 [lints]
 workspace = true

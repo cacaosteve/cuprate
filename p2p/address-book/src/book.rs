@@ -72,10 +72,15 @@ pub struct AddressBook<Z: BorshNetworkZone> {
 impl<Z: BorshNetworkZone> AddressBook<Z> {
     pub fn new(
         cfg: AddressBookConfig<Z>,
-        white_peers: Vec<ZoneSpecificPeerListEntryBase<Z::Addr>>,
-        gray_peers: Vec<ZoneSpecificPeerListEntryBase<Z::Addr>>,
-        anchor_peers: Vec<Z::Addr>,
+        mut white_peers: Vec<ZoneSpecificPeerListEntryBase<Z::Addr>>,
+        mut gray_peers: Vec<ZoneSpecificPeerListEntryBase<Z::Addr>>,
+        mut anchor_peers: Vec<Z::Addr>,
     ) -> Self {
+        // Old saved books may contain our own destination. Do not let a restart
+        // reintroduce self-peers which are now rejected during gossip.
+        white_peers.retain(|peer| !cfg.is_own_address(&peer.adr));
+        gray_peers.retain(|peer| !cfg.is_own_address(&peer.adr));
+        anchor_peers.retain(|address| !cfg.is_own_address(address));
         let white_list = PeerList::new(white_peers);
         let gray_list = PeerList::new(gray_peers);
         let anchor_list = HashSet::from_iter(anchor_peers);
@@ -247,7 +252,7 @@ impl<Z: BorshNetworkZone> AddressBook<Z> {
         peer_list.retain_mut(|peer| {
             peer.adr.make_canonical();
 
-            if peer.adr.should_add_to_peer_list() {
+            if peer.adr.should_add_to_peer_list() && !self.cfg.is_own_address(&peer.adr) {
                 !self.is_peer_banned(&peer.adr)
             } else {
                 false
@@ -326,6 +331,14 @@ impl<Z: BorshNetworkZone> AddressBook<Z> {
         internal_peer_id: InternalPeerID<Z::Addr>,
         peer: ConnectionPeerEntry<Z>,
     ) -> Result<(), AddressBookError> {
+        if peer
+            .addr
+            .as_ref()
+            .is_some_and(|address| self.cfg.is_own_address(address))
+            || matches!(&internal_peer_id, InternalPeerID::KnownAddr(address) if self.cfg.is_own_address(address))
+        {
+            return Err(AddressBookError::OwnAddress);
+        }
         if self.connected_peers.contains_key(&internal_peer_id) {
             return Err(AddressBookError::PeerAlreadyConnected);
         }

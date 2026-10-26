@@ -19,3 +19,7 @@ pub use socks::{is_socks5_proxy, Socks, SocksClientConfig};
 /// Disabled listener
 mod disabled;
 pub(crate) use disabled::DisabledListener;
+
+/// I2P transport using an external i2pd SOCKS5 proxy.
+mod i2p;
+pub use i2p::{I2pServerConfig, I2pSocks, I2pSocksClientConfig};

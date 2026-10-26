@@ -3,6 +3,8 @@ use std::net::{IpAddr, SocketAddr};
 use crate::{NetZoneAddress, NetworkZone};
 
 impl NetZoneAddress for SocketAddr {
+    const IS_ANONYMITY_NETWORK: bool = false;
+
     type BanID = IpAddr;
 
     fn set_port(&mut self, port: u16) {

@@ -88,6 +88,8 @@ tracing               = { workspace = true, features = ["default"] }
 tikv-jemallocator = { workspace = true, optional = true }
 
 [dev-dependencies]
+cuprate-test-utils = { workspace = true }
+tokio             = { workspace = true, features = ["test-util"] }
 tempfile          = { workspace = true }
 pretty_assertions = { workspace = true }
 rand               = { workspace = true }

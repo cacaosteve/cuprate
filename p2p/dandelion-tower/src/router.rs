@@ -59,6 +59,22 @@ pub enum State {
     Stem,
 }
 
+/// A routing result, including an explicit opt-in transition to clearnet recovery.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum RouteOutcome {
+    /// An ordinary stem/fluff result; the transaction's relay policy is unchanged.
+    Standard(State),
+    /// I2P-first routing used its permitted clearnet fallback. Record this before
+    /// enabling ordinary embargo promotion. Never returned for I2P-only routing.
+    LocalClearnetFallback(State),
+}
+
+impl From<State> for RouteOutcome {
+    fn from(state: State) -> Self {
+        Self::Standard(state)
+    }
+}
+
 /// The routing state of a transaction.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum TxState<Id> {

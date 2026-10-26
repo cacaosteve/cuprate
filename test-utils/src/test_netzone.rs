@@ -18,6 +18,8 @@ use cuprate_wire::network_address::{NetworkAddress, NetworkAddressIncorrectZone}
 pub struct TestNetZoneAddr(pub u32);
 
 impl NetZoneAddress for TestNetZoneAddr {
+    const IS_ANONYMITY_NETWORK: bool = false;
+
     type BanID = Self;
 
     fn set_port(&mut self, _: u16) {}
@@ -54,7 +56,9 @@ impl TryFrom<NetworkAddress> for TestNetZoneAddr {
                 SocketAddr::V4(v4) => Ok(Self(u32::from_be_bytes(v4.ip().octets()))),
                 SocketAddr::V6(_) => panic!("Only IPv4 addresses are allowed in test code."),
             },
-            NetworkAddress::Tor(_) => panic!("Only IPv4 addresses are allowed in test code."),
+            NetworkAddress::Tor(_) | NetworkAddress::I2p(_) => {
+                panic!("Only IPv4 addresses are allowed in test code.")
+            }
         }
     }
 }

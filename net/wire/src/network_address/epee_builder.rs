@@ -16,7 +16,7 @@ use cuprate_types::AddressType;
 
 use crate::NetworkAddress;
 
-use super::OnionAddr;
+use super::{I2pAddr, OnionAddr};
 
 //---------------------------------------------------------------------------------------------------- Network address construction
 
@@ -133,6 +133,16 @@ impl From<NetworkAddress> for TaggedNetworkAddress {
                     port: Some(onion_addr.port()),
                 }),
             },
+            NetworkAddress::I2p(i2p_addr) => Self {
+                ty: Some(AddressType::I2p),
+                addr: Some(AllFieldsNetworkAddress {
+                    m_ip: None,
+                    m_port: None,
+                    addr: None,
+                    host: Some(i2p_addr.addr_string()),
+                    port: Some(i2p_addr.port()),
+                }),
+            },
         }
     }
 }
@@ -181,8 +191,65 @@ impl AllFieldsNetworkAddress {
             AddressType::Tor => {
                 NetworkAddress::from(OnionAddr::new(self.host?.as_str(), self.port?).ok()?)
             }
-            // Invalid
-            AddressType::Invalid | AddressType::I2p => return None,
+            AddressType::I2p => {
+                NetworkAddress::from(I2pAddr::new(self.host?.as_str(), self.port?).ok()?)
+            }
+            AddressType::Invalid => return None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TaggedNetworkAddress;
+    use crate::{I2pAddr, NetworkAddress};
+
+    // Fixed portable-storage bytes, following monerod's i2p_address::store:
+    // address type 3; host string; compatibility port encoded as uint16(1).
+    // This is intentionally independent of TaggedNetworkAddress's serializer.
+    const MONERO_I2P_ADDRESS: &[u8] = b"\x01\x11\x01\x01\x01\x01\x02\x01\x01\
+        \x08\x04type\x08\x03\x04addr\x0c\x08\x04host\x0a\xf0\
+        aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b32.i2p\
+        \x04port\x07\x01\x00";
+
+    #[test]
+    fn i2p_address_uses_monero_i2p_wire_variant() {
+        let address: I2pAddr = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b32.i2p:18083"
+            .parse()
+            .unwrap();
+        let encoded = TaggedNetworkAddress::from(NetworkAddress::from(address));
+        let decoded = NetworkAddress::try_from(encoded).unwrap();
+
+        assert_eq!(decoded, NetworkAddress::I2p(address));
+    }
+
+    #[test]
+    fn i2p_address_matches_monero_portable_storage_fixture() {
+        let mut bytes = MONERO_I2P_ADDRESS;
+        let address: NetworkAddress = cuprate_epee_encoding::from_bytes(&mut bytes).unwrap();
+        let NetworkAddress::I2p(address) = address else {
+            panic!("expected the Monero I2P address type");
+        };
+        assert_eq!(address.port(), 1);
+        assert_eq!(
+            address.addr_string(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b32.i2p"
+        );
+        let encoded = cuprate_epee_encoding::to_bytes(NetworkAddress::I2p(address)).unwrap();
+        assert_eq!(encoded.as_ref(), MONERO_I2P_ADDRESS);
+    }
+
+    #[test]
+    fn legacy_i2p_wire_ports_are_normalized_not_used_as_tcp_ports() {
+        let mut legacy = MONERO_I2P_ADDRESS.to_vec();
+        let length = legacy.len();
+        legacy[length - 2..].copy_from_slice(&18084_u16.to_le_bytes());
+        let decoded: NetworkAddress =
+            cuprate_epee_encoding::from_bytes(&mut legacy.as_slice()).unwrap();
+        assert_eq!(decoded.port(), 1);
+        assert_eq!(
+            cuprate_epee_encoding::to_bytes(decoded).unwrap().as_ref(),
+            MONERO_I2P_ADDRESS
+        );
     }
 }

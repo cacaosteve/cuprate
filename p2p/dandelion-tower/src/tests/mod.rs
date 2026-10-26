@@ -8,7 +8,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tower::{util::service_fn, Service, ServiceExt};
 
 use crate::{
-    traits::{TxStoreRequest, TxStoreResponse},
+    traits::{StoredTx, TxStoreRequest, TxStoreResponse},
     OutboundPeer, State,
 };
 
@@ -95,8 +95,15 @@ pub(crate) fn mock_in_memory_backing_pool<
                 match req {
                     TxStoreRequest::Get(tx_id) => {
                         let tx_state = txs.lock().unwrap().get(&tx_id).cloned();
-                        Ok(TxStoreResponse::Transaction(tx_state))
+                        Ok(TxStoreResponse::Transaction(tx_state.map(|(tx, state)| {
+                            StoredTx {
+                                tx,
+                                state,
+                                local_embargo_policy: None,
+                            }
+                        })))
                     }
+                    TxStoreRequest::RecordClearnetFallback(_) => Ok(TxStoreResponse::Ok),
                     TxStoreRequest::Promote(tx_id) => {
                         let _ = txs
                             .lock()

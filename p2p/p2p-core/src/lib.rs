@@ -6,7 +6,7 @@
 //!
 //! # Network Zones
 //!
-//! This crate abstracts over network zones, Tor/I2p/clearnet with the [`NetworkZone`] trait. Currently only clearnet is implemented: [`ClearNet`].
+//! This crate abstracts over clearnet, Tor, and I2P network zones with the [`NetworkZone`] trait.
 //!
 //! # Usage
 //!
@@ -87,7 +87,7 @@ pub mod transports;
 pub mod types;
 
 pub use error::*;
-pub use network_zones::{ClearNet, Tor};
+pub use network_zones::{ClearNet, I2p, Tor};
 pub use protocol::*;
 use services::*;
 //re-export
@@ -116,6 +116,12 @@ pub trait NetZoneAddress:
     + Unpin
     + 'static
 {
+    /// Whether this address belongs to an anonymity network zone.
+    ///
+    /// Anonymous zones are restricted to transaction relay and must not be used for
+    /// block synchronization or block propagation.
+    const IS_ANONYMITY_NETWORK: bool;
+
     /// Cuprate needs to be able to ban peers by IP addresses and not just by `SocketAddr` as
     /// that include the port, to be able to facilitate this network addresses must have a ban ID
     /// which for hidden services could just be the address it self but for clear net addresses will

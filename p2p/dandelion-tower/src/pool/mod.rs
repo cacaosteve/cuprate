@@ -20,7 +20,7 @@
 //! When using your handle to the backing store it must be remembered to keep transactions in the stem pool hidden.
 //! So handle any requests to the tx-pool like the stem side of the pool does not exist.
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     hash::Hash,
     marker::PhantomData,
     task::{Context, Poll},
@@ -37,7 +37,7 @@ use tower::Service;
 
 use crate::{
     traits::{TxStoreRequest, TxStoreResponse},
-    DandelionConfig, DandelionRouteReq, DandelionRouterError, State,
+    DandelionConfig, DandelionRouteReq, DandelionRouterError, RouteOutcome,
 };
 
 mod incoming_tx;
@@ -45,6 +45,16 @@ mod manager;
 
 pub use incoming_tx::{IncomingTx, IncomingTxBuilder};
 pub use manager::{DandelionPoolManager, DandelionPoolShutDown};
+
+/// What to do with locally submitted stem transactions when their embargo expires.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LocalTxEmbargoPolicy {
+    /// Promote the transaction to the public pool and fluff it, following standard Dandelion++.
+    #[default]
+    Fluff,
+    /// Retry the local route and keep the transaction in the private pool.
+    RetryLocal,
+}
 
 /// Start the [`DandelionPoolManager`].
 ///
@@ -72,10 +82,38 @@ where
         + Send
         + 'static,
     P::Future: Send + 'static,
-    R: Service<DandelionRouteReq<Tx, PeerId>, Response = State, Error = DandelionRouterError>
+    R: Service<DandelionRouteReq<Tx, PeerId>, Error = DandelionRouterError> + Send + 'static,
+    R::Future: Send + 'static,
+    R::Response: Into<RouteOutcome>,
+{
+    start_dandelion_pool_manager_with_local_tx_embargo_policy(
+        buffer_size,
+        dandelion_router,
+        backing_pool,
+        config,
+        LocalTxEmbargoPolicy::Fluff,
+    )
+}
+
+/// Start the pool manager with an explicit policy for locally submitted transactions.
+pub fn start_dandelion_pool_manager_with_local_tx_embargo_policy<P, R, Tx, TxId, PeerId>(
+    buffer_size: usize,
+    dandelion_router: R,
+    backing_pool: P,
+    config: DandelionConfig,
+    local_tx_embargo_policy: LocalTxEmbargoPolicy,
+) -> (DandelionPoolService<Tx, TxId, PeerId>, JoinHandle<()>)
+where
+    Tx: Clone + Send + 'static,
+    TxId: Hash + Eq + Clone + Send + 'static,
+    PeerId: Hash + Eq + Clone + Send + 'static,
+    P: Service<TxStoreRequest<TxId>, Response = TxStoreResponse<Tx>, Error = tower::BoxError>
         + Send
         + 'static,
+    P::Future: Send + 'static,
+    R: Service<DandelionRouteReq<Tx, PeerId>, Error = DandelionRouterError> + Send + 'static,
     R::Future: Send + 'static,
+    R::Response: Into<RouteOutcome>,
 {
     let (tx, rx) = mpsc::channel(buffer_size);
 
@@ -84,18 +122,24 @@ where
         backing_pool,
         routing_set: JoinSet::new(),
         stem_origins: HashMap::new(),
+        local_tx_ids: HashSet::new(),
+        local_routing_pending: HashSet::new(),
+        routing_tasks: HashMap::new(),
         embargo_timers: DelayQueue::new(),
         embargo_timer_keys: HashMap::new(),
         embargo_dist: Exp::new(1.0 / config.average_embargo_timeout().as_secs_f64()).unwrap(),
+        local_tx_embargo_policy,
         config,
         _tx: PhantomData,
     };
 
-    let task = tokio::spawn(pool.run(rx));
+    let (remove_tx, remove_rx) = mpsc::channel(buffer_size);
+    let task = tokio::spawn(pool.run(rx, remove_rx));
 
     (
         DandelionPoolService {
             tx: PollSender::new(tx),
+            remove_tx,
         },
         task,
     )
@@ -106,12 +150,27 @@ where
 /// Used to send [`IncomingTx`]s to the [`DandelionPoolManager`]
 #[derive(Clone)]
 pub struct DandelionPoolService<Tx, TxId, PeerId> {
+    /// Cancellation is separate from the incoming queue and processed first.
+    remove_tx: mpsc::Sender<(TxId, oneshot::Sender<()>)>,
     #[expect(clippy::type_complexity)]
     /// The channel to [`DandelionPoolManager`].
     tx: PollSender<(
         (IncomingTx<Tx, TxId, PeerId>, tracing::Span),
         oneshot::Sender<()>,
     )>,
+}
+
+impl<Tx, TxId, PeerId> DandelionPoolService<Tx, TxId, PeerId> {
+    /// Cancel pending relay attempts and forget timers for a removed transaction.
+    /// Already transmitted bytes cannot be recalled.
+    pub async fn remove_transaction(&self, tx_id: TxId) -> Result<(), DandelionPoolShutDown> {
+        let (tx, rx) = oneshot::channel();
+        self.remove_tx
+            .send((tx_id, tx))
+            .await
+            .map_err(|_| DandelionPoolShutDown)?;
+        rx.await.map_err(|_| DandelionPoolShutDown)
+    }
 }
 
 impl<Tx, TxId, PeerId> Service<IncomingTx<Tx, TxId, PeerId>>

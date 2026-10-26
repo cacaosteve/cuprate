@@ -11,7 +11,7 @@ use tracing::instrument;
 use cuprate_dandelion_tower::{
     pool::{DandelionPoolService, IncomingTxBuilder},
     traits::DiffuseRequest,
-    TxState,
+    State, TxState,
 };
 use cuprate_helper::time::current_unix_timestamp;
 use cuprate_p2p_core::ClearNet;
@@ -19,10 +19,11 @@ use cuprate_txpool::service::{
     interface::{TxpoolReadRequest, TxpoolReadResponse, TxpoolWriteRequest, TxpoolWriteResponse},
     TxpoolReadHandle, TxpoolWriteHandle,
 };
+use cuprate_txpool::TxRelay;
 use cuprate_types::TransactionVerificationData;
 
 use crate::{
-    config::TxpoolConfig,
+    config::{LocalTxRelayMode, TxpoolConfig},
     monitor::{FatalError, TaskExecutor},
     p2p::CrossNetworkInternalPeerId,
     txpool::{
@@ -32,6 +33,9 @@ use crate::{
 };
 
 const INCOMING_TX_QUEUE_SIZE: usize = 100;
+
+#[cfg(test)]
+mod tests;
 
 /// The maximum number of recently-removed public transactions to remember.
 ///
@@ -51,6 +55,7 @@ pub(crate) async fn start_txpool_manager(
     dandelion_pool_manager: DandelionPoolService<DandelionTx, TxId, CrossNetworkInternalPeerId>,
     config: TxpoolConfig,
     task_executor: TaskExecutor,
+    local_tx_relay_mode: LocalTxRelayMode,
 ) -> Result<TxpoolManagerHandle, FatalError> {
     let TxpoolReadResponse::Backlog(backlog) = txpool_read_handle
         .ready()
@@ -84,6 +89,7 @@ pub(crate) async fn start_txpool_manager(
                     fee: tx.fee,
                     received_at: tx.received_at,
                     private: tx.private,
+                    relay: tx.relay,
                     timeout_key,
                 },
             )
@@ -108,12 +114,28 @@ pub(crate) async fn start_txpool_manager(
         promote_tx_channel,
         diffuse_service,
         config,
+        local_tx_relay_mode,
     };
 
-    tracing::info!(stem_txs = stem_txs.len(), "promoting stem txs");
+    tracing::info!(
+        stem_txs = stem_txs.len(),
+        "recovering persisted transaction origins and relay policies"
+    );
 
     for tx in stem_txs {
-        manager.promote_tx(tx).await?;
+        match manager.current_txs[&tx].relay {
+            TxRelay::LocalI2pThenClearnet | TxRelay::LocalI2pOnly => {
+                manager.requeue_private_tx(tx).await?;
+            }
+            TxRelay::Peer | TxRelay::Local | TxRelay::LocalI2pClearnet => {
+                manager.promote_tx(tx).await?;
+            }
+            TxRelay::Unknown => {
+                // Older prototypes did not store origin. Guessing could deanonymize a
+                // queued local I2P transaction or misclassify a peer's transaction.
+                tracing::warn!(tx_id = hex::encode(tx), "Legacy private transaction has no origin metadata; retaining without automatic relay");
+            }
+        }
     }
 
     let (command_tx, command_rx) = mpsc::channel(INCOMING_TX_QUEUE_SIZE);
@@ -238,6 +260,8 @@ struct TxInfo {
     received_at: u64,
     /// Whether the tx is in the private pool.
     private: bool,
+    /// Origin and relay policy survive peer echoes and configuration changes.
+    relay: TxRelay,
 
     /// The [`delay_queue::Key`] for the timeout queue in the manager.
     ///
@@ -281,9 +305,40 @@ struct TxpoolManager {
     diffuse_service: DiffuseService<ClearNet>,
 
     config: TxpoolConfig,
+    local_tx_relay_mode: LocalTxRelayMode,
 }
 
 impl TxpoolManager {
+    /// Resume a private local transaction using its persisted relay policy after restart.
+    async fn requeue_private_tx(&mut self, tx_id: [u8; 32]) -> Result<(), FatalError> {
+        let TxpoolReadResponse::TxBlob { tx_blob, relay, .. } = self
+            .txpool_read_handle
+            .ready()
+            .await?
+            .call(TxpoolReadRequest::TxBlob(tx_id))
+            .await?
+        else {
+            unreachable!()
+        };
+
+        let tx = DandelionTx(Bytes::from(tx_blob), relay);
+        let policy = tx.embargo_policy();
+        let incoming_tx = IncomingTxBuilder::new(tx, tx_id)
+            .with_local_tx_embargo_policy(policy)
+            .with_routing_state(TxState::Local)
+            .with_state_in_db(Some(State::Stem))
+            .build()
+            .expect("stem transactions must be requeued");
+
+        self.dandelion_pool_manager
+            .ready()
+            .await?
+            .call(incoming_tx)
+            .await?;
+
+        Ok(())
+    }
+
     /// Removes a transaction from the tx-pool manager, and optionally the database too.
     ///
     /// # Panics
@@ -304,6 +359,8 @@ impl TxpoolManager {
                 .call(TxpoolWriteRequest::RemoveTransaction(tx))
                 .await?;
         }
+
+        self.dandelion_pool_manager.remove_transaction(tx).await?;
 
         let tx_info = self.current_txs.swap_remove(&tx).unwrap();
 
@@ -337,7 +394,7 @@ impl TxpoolManager {
     async fn rerelay_tx(&mut self, tx: [u8; 32]) -> Result<(), FatalError> {
         tracing::debug!("re-relaying tx to network");
 
-        let TxpoolReadResponse::TxBlob { tx_blob, .. } = self
+        let TxpoolReadResponse::TxBlob { tx_blob, relay, .. } = self
             .txpool_read_handle
             .ready()
             .await?
@@ -348,7 +405,7 @@ impl TxpoolManager {
         };
 
         self.diffuse_service
-            .call(DiffuseRequest(DandelionTx(Bytes::from(tx_blob))))
+            .call(DiffuseRequest(DandelionTx(Bytes::from(tx_blob), relay)))
             .await?;
 
         Ok(())
@@ -394,7 +451,7 @@ impl TxpoolManager {
 
     /// Adds a tx to the tx-pool manager.
     #[instrument(level = "trace", skip_all, fields(tx_id = hex::encode(tx)))]
-    fn track_tx(&mut self, tx: [u8; 32], weight: usize, fee: u64, private: bool) {
+    fn track_tx(&mut self, tx: [u8; 32], weight: usize, fee: u64, private: bool, relay: TxRelay) {
         let now = current_unix_timestamp();
 
         let timeout_key = if private {
@@ -417,6 +474,7 @@ impl TxpoolManager {
                 fee,
                 received_at: now,
                 private,
+                relay,
                 timeout_key,
             },
         );
@@ -431,8 +489,19 @@ impl TxpoolManager {
     ) -> Result<(), FatalError> {
         tracing::debug!("handling new tx");
 
+        let relay = if state == TxState::Local {
+            match self.local_tx_relay_mode {
+                LocalTxRelayMode::Clearnet => TxRelay::Local,
+                LocalTxRelayMode::I2pThenClearnet => TxRelay::LocalI2pThenClearnet,
+                LocalTxRelayMode::I2pOnly => TxRelay::LocalI2pOnly,
+            }
+        } else {
+            TxRelay::Peer
+        };
+        let dandelion_tx = DandelionTx(Bytes::copy_from_slice(&tx.tx_blob), relay);
+        let policy = dandelion_tx.embargo_policy();
         let incoming_tx =
-            IncomingTxBuilder::new(DandelionTx(Bytes::copy_from_slice(&tx.tx_blob)), tx.tx_hash);
+            IncomingTxBuilder::new(dandelion_tx, tx.tx_hash).with_local_tx_embargo_policy(policy);
 
         let (tx_hash, tx_weight, tx_fee) = (tx.tx_hash, tx.tx_weight, tx.fee);
 
@@ -443,6 +512,7 @@ impl TxpoolManager {
             .call(TxpoolWriteRequest::AddTransaction {
                 tx: Box::new(tx),
                 state_stem: state.is_stem_stage(),
+                relay,
             })
             .await?
         else {
@@ -457,7 +527,7 @@ impl TxpoolManager {
             return Ok(());
         }
 
-        self.track_tx(tx_hash, tx_weight, tx_fee, state.is_stem_stage());
+        self.track_tx(tx_hash, tx_weight, tx_fee, state.is_stem_stage(), relay);
 
         let incoming_tx = incoming_tx
             .with_routing_state(state)
@@ -484,6 +554,13 @@ impl TxpoolManager {
 
         if !tx_info.private {
             tracing::trace!("not promoting tx, tx is already public");
+            return Ok(());
+        }
+
+        if matches!(tx_info.relay, TxRelay::LocalI2pOnly | TxRelay::Unknown) {
+            tracing::warn!(
+                "refusing public promotion of an I2P-only or unknown-origin private transaction"
+            );
             return Ok(());
         }
 

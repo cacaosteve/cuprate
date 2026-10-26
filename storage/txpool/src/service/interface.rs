@@ -91,7 +91,11 @@ pub enum TxpoolReadRequest {
 #[expect(clippy::large_enum_variant)]
 pub enum TxpoolReadResponse {
     /// The response for [`TxpoolReadRequest::TxBlob`].
-    TxBlob { tx_blob: Vec<u8>, state_stem: bool },
+    TxBlob {
+        tx_blob: Vec<u8>,
+        state_stem: bool,
+        relay: crate::TxRelay,
+    },
 
     /// The response for [`TxpoolReadRequest::TxVerificationData`].
     TxVerificationData(TransactionVerificationData),
@@ -158,6 +162,9 @@ pub enum TxpoolReadResponse {
 /// The transaction pool [`tower::Service`] write request type.
 #[derive(Clone)]
 pub enum TxpoolWriteRequest {
+    /// Record that an I2P-first local transaction has used clearnet fallback.
+    /// Missing records are a no-op; strict I2P-only records cannot transition.
+    RecordClearnetFallback(TransactionHash),
     /// Add a transaction to the pool.
     ///
     /// Returns [`TxpoolWriteResponse::AddTransaction`].
@@ -168,6 +175,8 @@ pub enum TxpoolWriteRequest {
         ///
         /// [`true`] if this tx is in the stem state.
         state_stem: bool,
+        /// Original submission source and snapshotted local relay policy.
+        relay: crate::TxRelay,
     },
 
     /// Remove a transaction with the given hash from the pool.

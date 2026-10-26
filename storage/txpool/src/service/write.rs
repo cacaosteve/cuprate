@@ -20,6 +20,9 @@ use crate::{
     types::{KeyImage, TransactionHash, TransactionInfo, TxStateFlags},
 };
 
+#[cfg(test)]
+mod tests;
+
 /// The txpool [`Service`] write handle.
 #[derive(Clone)]
 pub struct TxpoolWriteHandle {
@@ -61,14 +64,44 @@ fn handle_txpool_request(
     env: &TxpoolDatabase,
     req: TxpoolWriteRequest,
 ) -> Result<TxpoolWriteResponse, TxPoolError> {
+    let _write_guard = env.write_lock.lock().unwrap();
     match req {
-        TxpoolWriteRequest::AddTransaction { tx, state_stem } => {
-            add_transaction(env, &tx, state_stem)
+        TxpoolWriteRequest::RecordClearnetFallback(tx_hash) => {
+            record_clearnet_fallback(env, &tx_hash)
         }
+        TxpoolWriteRequest::AddTransaction {
+            tx,
+            state_stem,
+            relay,
+        } => add_transaction(env, &tx, state_stem, relay),
         TxpoolWriteRequest::RemoveTransaction(tx_hash) => remove_transaction(env, &tx_hash),
         TxpoolWriteRequest::Promote(tx_hash) => promote(env, &tx_hash),
         TxpoolWriteRequest::NewBlock { spent_key_images } => new_block(env, &spent_key_images),
     }
+}
+
+fn record_clearnet_fallback(
+    db: &TxpoolDatabase,
+    tx_hash: &TransactionHash,
+) -> Result<TxpoolWriteResponse, TxPoolError> {
+    let Some(info) = db.tx_infos.get(tx_hash)? else {
+        return Ok(TxpoolWriteResponse::Ok);
+    };
+    let mut info: TransactionInfo = bytemuck::pod_read_unaligned(info.as_ref());
+    match info.flags.relay() {
+        crate::TxRelay::LocalI2pThenClearnet => {
+            info.flags.insert(TxStateFlags::CLEARNET_FALLBACK);
+            db.tx_infos.insert(tx_hash, bytemuck::bytes_of(&info))?;
+        }
+        crate::TxRelay::LocalI2pClearnet => {}
+        crate::TxRelay::Unknown
+        | crate::TxRelay::Peer
+        | crate::TxRelay::Local
+        | crate::TxRelay::LocalI2pOnly => {
+            return Err(TxPoolError::InvalidRelayTransition);
+        }
+    }
+    Ok(TxpoolWriteResponse::Ok)
 }
 
 //---------------------------------------------------------------------------------------------------- Handler functions
@@ -85,6 +118,7 @@ fn add_transaction(
     db: &TxpoolDatabase,
     tx: &TransactionVerificationData,
     state_stem: bool,
+    relay: crate::TxRelay,
 ) -> Result<TxpoolWriteResponse, TxPoolError> {
     struct KiDropGuard<'a>(Vec<[u8; 32]>, &'a TxpoolDatabase);
 
@@ -118,7 +152,7 @@ fn add_transaction(
 
     let mut writer = db.fjall_database.batch();
 
-    if let Err(e) = ops::add_transaction(tx, state_stem, &mut writer, db) {
+    if let Err(e) = ops::add_transaction(tx, state_stem, relay, &mut writer, db) {
         // error adding the tx, abort the DB transaction.
         drop(writer);
 

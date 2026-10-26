@@ -88,7 +88,7 @@ Yes, although some niche wallet functions may not work. Remember Cuprate is not 
 ## Can `cuprated` be used with an anonymity network like Tor?
 Yes.
 
-Tor and [`arti`](https://arti.torproject.org) support have been integrated into `cuprated`. See [config](./config.md) for configuration options.
+Tor and [`arti`](https://arti.torproject.org) support have been integrated into `cuprated`. See [config](./config.md) for configuration options. Experimental I2P P2P support is described in the [I2P guide](./networking/i2p.md).
 
 ## What is the versioning scheme?
 `cuprated` is currently moving to beta (`0.x.y`).
