@@ -59,7 +59,7 @@ The port/address behavior follows [Monero's I2P address implementation](https://
 
 The I2P P2P zone only permits transaction broadcasts and the protocol's necessary connection-management messages. Block requests, block responses, and block propagation are rejected over this zone.
 
-This feature is experimental and has only been tested with local transport mocks so far. A real `i2pd` integration test and broader privacy review are still needed before relying on it for production use.
+This feature is experimental. Validation on 2026-10-26 included the affected library regression tests, a real I2P handshake/timed-sync probe against a public Monero peer, and a cross-router probe against a controlled monerod 0.18.5.4 instance. The transport probes passed with i2pd 3.0.0 and with an existing shared i2pd 2.61.0 router. These tests do not demonstrate end-to-end transaction propagation, validate every relay policy on a live network, or establish anonymity. Broader privacy review and controlled relay testing are still needed before relying on it for production use.
 
 ## Opt-in interoperability probe
 
