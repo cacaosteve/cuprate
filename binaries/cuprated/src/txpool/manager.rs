@@ -29,6 +29,7 @@ use crate::{
     txpool::{
         dandelion::DiffuseService,
         incoming_tx::{DandelionTx, TxId},
+        IncomingTxError,
     },
 };
 
@@ -68,6 +69,20 @@ pub(crate) async fn start_txpool_manager(
 
     tracing::info!(txs_in_pool = backlog.len(), "starting txpool manager");
 
+    let pool_bytes = backlog.iter().try_fold(0_usize, |total, tx| {
+        total
+            .checked_add(tx.blob_size)
+            .ok_or("transaction pool byte count overflow")
+    })?;
+    // Do not silently delete (or relay) previously accepted private transactions.
+    // An operator lowering the cap must first make room or restore the old cap.
+    if pool_bytes > config.max_txpool_byte_size {
+        return Err(format!(
+            "persisted transaction pool contains {pool_bytes} bytes, exceeding max_txpool_byte_size {}; raise the cap before restarting",
+            config.max_txpool_byte_size
+        ).into());
+    }
+
     let mut stem_txs = Vec::new();
 
     let mut tx_timeouts = DelayQueue::with_capacity(backlog.len());
@@ -85,6 +100,7 @@ pub(crate) async fn start_txpool_manager(
             (
                 tx.id,
                 TxInfo {
+                    blob_size: tx.blob_size,
                     weight: tx.weight,
                     fee: tx.fee,
                     received_at: tx.received_at,
@@ -103,6 +119,7 @@ pub(crate) async fn start_txpool_manager(
         .collect();
 
     let mut manager = TxpoolManager {
+        pool_bytes,
         current_txs,
         tx_timeouts,
         public_pool_timestamps,
@@ -164,6 +181,7 @@ pub(crate) enum TxpoolManagerCommand {
         TransactionVerificationData,
         TxState<CrossNetworkInternalPeerId>,
         Option<cuprate_p2p_core::TransactionCounters>,
+        oneshot::Sender<Result<TxAdmission, String>>,
     ),
 
     /// Request hashes of public-pool transactions added/removed at or after a UNIX timestamp.
@@ -171,6 +189,15 @@ pub(crate) enum TxpoolManagerCommand {
         since: u64,
         response_tx: oneshot::Sender<PoolInfoSinceResponse>,
     },
+}
+
+/// The actual result of serialized pool admission, not just command enqueueing.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub(crate) enum TxAdmission {
+    Inserted,
+    AlreadyKnown,
+    DoubleSpend,
+    Full,
 }
 
 /// Response to [`TxpoolManagerCommand::PoolInfoSince`].
@@ -197,6 +224,34 @@ pub(crate) struct TxpoolManagerHandle {
 }
 
 impl TxpoolManagerHandle {
+    /// Wait for the manager to finish insertion before acknowledging a submission.
+    pub(crate) async fn submit(
+        &self,
+        tx: TransactionVerificationData,
+        state: TxState<CrossNetworkInternalPeerId>,
+        origin: Option<cuprate_p2p_core::TransactionCounters>,
+    ) -> Result<TxAdmission, IncomingTxError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(TxpoolManagerCommand::IncomingTx(
+                tx,
+                state,
+                origin,
+                response_tx,
+            ))
+            .await
+            .map_err(|_| IncomingTxError::ChannelClosed)?;
+        match response_rx
+            .await
+            .map_err(|_| IncomingTxError::ChannelClosed)?
+        {
+            Ok(result @ (TxAdmission::Inserted | TxAdmission::AlreadyKnown)) => Ok(result),
+            Ok(TxAdmission::DoubleSpend) => Err(IncomingTxError::PoolDoubleSpend),
+            Ok(TxAdmission::Full) => Err(IncomingTxError::PoolFull),
+            Err(error) => Err(IncomingTxError::PoolSubmissionFailed(error)),
+        }
+    }
+
     #[cfg(test)]
     /// Create a mock [`TxpoolManagerHandle`] that does nothing.
     ///
@@ -245,6 +300,8 @@ impl TxpoolManagerHandle {
 
 /// Information on a transaction in the tx-pool.
 struct TxInfo {
+    /// Serialized size; includes both public and private transactions.
+    blob_size: usize,
     /// The weight of the transaction.
     #[expect(
         dead_code,
@@ -271,6 +328,8 @@ struct TxInfo {
 }
 
 struct TxpoolManager {
+    /// Serialized bytes held in the database, including private queued transactions.
+    pool_bytes: usize,
     current_txs: IndexMap<[u8; 32], TxInfo>,
 
     /// A [`DelayQueue`] for waiting on tx timeouts.
@@ -364,6 +423,10 @@ impl TxpoolManager {
         self.dandelion_pool_manager.remove_transaction(tx).await?;
 
         let tx_info = self.current_txs.swap_remove(&tx).unwrap();
+        self.pool_bytes = self
+            .pool_bytes
+            .checked_sub(tx_info.blob_size)
+            .expect("pool byte accounting must match tracked transactions");
 
         tx_info
             .timeout_key
@@ -452,10 +515,14 @@ impl TxpoolManager {
 
     /// Adds a tx to the tx-pool manager.
     #[instrument(level = "trace", skip_all, fields(tx_id = hex::encode(tx)))]
-    fn track_tx(&mut self, tx: [u8; 32], weight: usize, fee: u64, private: bool, relay: TxRelay) {
+    fn track_tx(&mut self, tx: [u8; 32], mut info: TxInfo) {
+        self.pool_bytes = self
+            .pool_bytes
+            .checked_add(info.blob_size)
+            .expect("admission must prevent pool byte overflow");
         let now = current_unix_timestamp();
 
-        let timeout_key = if private {
+        info.timeout_key = if info.private {
             // The dandelion pool handles stem tx embargo.
             None
         } else {
@@ -468,17 +535,8 @@ impl TxpoolManager {
             Some(self.tx_timeouts.insert(tx, Duration::from_secs(timeout)))
         };
 
-        self.current_txs.insert(
-            tx,
-            TxInfo {
-                weight,
-                fee,
-                received_at: now,
-                private,
-                relay,
-                timeout_key,
-            },
-        );
+        info.received_at = now;
+        self.current_txs.insert(tx, info);
     }
 
     /// Handles an incoming tx, adding it to the pool and routing it.
@@ -488,8 +546,20 @@ impl TxpoolManager {
         tx: TransactionVerificationData,
         state: TxState<CrossNetworkInternalPeerId>,
         origin: Option<cuprate_p2p_core::TransactionCounters>,
-    ) -> Result<(), FatalError> {
+    ) -> Result<TxAdmission, FatalError> {
         tracing::debug!("handling new tx");
+
+        if self.current_txs.contains_key(&tx.tx_hash) {
+            return Ok(TxAdmission::AlreadyKnown);
+        }
+        let blob_size = tx.tx_blob.len();
+        if self
+            .pool_bytes
+            .checked_add(blob_size)
+            .is_none_or(|size| size > self.config.max_txpool_byte_size)
+        {
+            return Ok(TxAdmission::Full);
+        }
 
         let relay = if state == TxState::Local {
             match self.local_tx_relay_mode {
@@ -505,7 +575,16 @@ impl TxpoolManager {
         let incoming_tx =
             IncomingTxBuilder::new(dandelion_tx, tx.tx_hash).with_local_tx_embargo_policy(policy);
 
-        let (tx_hash, tx_weight, tx_fee) = (tx.tx_hash, tx.tx_weight, tx.fee);
+        let tx_hash = tx.tx_hash;
+        let info = TxInfo {
+            blob_size,
+            weight: tx.tx_weight,
+            fee: tx.fee,
+            received_at: current_unix_timestamp(),
+            private: state.is_stem_stage(),
+            relay,
+            timeout_key: None,
+        };
 
         let TxpoolWriteResponse::AddTransaction(double_spend) = self
             .txpool_write_handle
@@ -526,10 +605,10 @@ impl TxpoolManager {
                 double_spent = hex::encode(tx_hash),
                 "transaction is a double spend, ignoring"
             );
-            return Ok(());
+            return Ok(TxAdmission::DoubleSpend);
         }
 
-        self.track_tx(tx_hash, tx_weight, tx_fee, state.is_stem_stage(), relay);
+        self.track_tx(tx_hash, info);
         if let Some(origin) = origin {
             origin.record_accepted();
         }
@@ -546,7 +625,7 @@ impl TxpoolManager {
             .call(incoming_tx)
             .await?;
 
-        Ok(())
+        Ok(TxAdmission::Inserted)
     }
 
     /// Promote a tx to the public pool.
@@ -654,8 +733,14 @@ impl TxpoolManager {
                 }
                 Some(command) = command_rx.recv() => {
                     match command {
-                        TxpoolManagerCommand::IncomingTx(tx, state, origin) => {
-                            self.handle_incoming_tx(tx, state, origin).await?;
+                        TxpoolManagerCommand::IncomingTx(tx, state, origin, response_tx) => {
+                            match self.handle_incoming_tx(tx, state, origin).await {
+                                Ok(admission) => { let _ = response_tx.send(Ok(admission)); }
+                                Err(error) => {
+                                    let _ = response_tx.send(Err(error.to_string()));
+                                    return Err(error);
+                                }
+                            }
                         }
                         TxpoolManagerCommand::PoolInfoSince { since, response_tx } => {
                             // If `since` is 0 the requester wants the full pool. If `since` is older than `removed_txs_start_time`,

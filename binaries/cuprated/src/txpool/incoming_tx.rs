@@ -37,7 +37,7 @@ use crate::{
     p2p::CrossNetworkInternalPeerId,
     txpool::{
         dandelion::{self, DiffuseService, MainDandelionRouter},
-        manager::{start_txpool_manager, TxpoolManagerCommand, TxpoolManagerHandle},
+        manager::{start_txpool_manager, TxpoolManagerHandle},
         relay_rules::check_tx_relay_rules,
         txs_being_handled::{TxsBeingHandled, TxsBeingHandledLocally},
         IncomingTxError,
@@ -57,9 +57,7 @@ pub(crate) struct IncomingTxs {
     /// rules will be ignored and processing will continue,
     /// otherwise the service will return an early error.
     pub drop_relay_rule_errors: bool,
-    #[expect(dead_code, reason = "TODO:")]
-    /// If [`true`], only checks will be done,
-    /// the transaction will not be relayed.
+    /// Unsupported until persisted no-relay semantics exist. Rejected before processing.
     pub do_not_relay: bool,
 }
 
@@ -216,8 +214,7 @@ async fn handle_incoming_txs(
         txs,
         state,
         drop_relay_rule_errors,
-        // TODO: use this field
-        do_not_relay: _,
+        do_not_relay,
     }: IncomingTxs,
     txs_being_handled: TxsBeingHandled,
     mut blockchain_context_cache: BlockchainContextService,
@@ -227,10 +224,18 @@ async fn handle_incoming_txs(
     mut dandelion_pool_manager: DandelionPoolService<DandelionTx, TxId, CrossNetworkInternalPeerId>,
     reorg_lock: Arc<RwLock<()>>,
 ) -> Result<(), IncomingTxError> {
+    if do_not_relay {
+        return Err(IncomingTxError::DoNotRelayUnsupported);
+    }
     let _reorg_guard = reorg_lock.read().await;
 
-    let (txs, stem_pool_txs, _txs_being_handled_guard) =
-        prepare_incoming_txs(txs, txs_being_handled, &mut txpool_read_handle).await?;
+    let (txs, stem_pool_txs, _txs_being_handled_guard) = prepare_incoming_txs(
+        txs,
+        txs_being_handled,
+        &mut txpool_read_handle,
+        !drop_relay_rule_errors,
+    )
+    .await?;
 
     let context = blockchain_context_cache.blockchain_context();
 
@@ -264,19 +269,19 @@ async fn handle_incoming_txs(
             "passing tx to tx-pool manager"
         );
 
-        // TODO: take into account `do_not_relay` in the tx-pool manager.
-
-        if txpool_manager_handle
-            .command_tx
-            .send(TxpoolManagerCommand::IncomingTx(
-                tx,
-                state.clone(),
-                origin.clone(),
-            ))
+        if let Err(error) = txpool_manager_handle
+            .submit(tx, state.clone(), origin.clone())
             .await
-            .is_err()
         {
-            return Err(IncomingTxError::ChannelClosed);
+            if drop_relay_rule_errors
+                && matches!(
+                    error,
+                    IncomingTxError::PoolDoubleSpend | IncomingTxError::PoolFull
+                )
+            {
+                continue;
+            }
+            return Err(error);
         }
     }
 
@@ -306,6 +311,7 @@ async fn prepare_incoming_txs(
     tx_blobs: Vec<Bytes>,
     txs_being_handled: TxsBeingHandled,
     txpool_read_handle: &mut TxpoolReadHandle,
+    reject_in_progress: bool,
 ) -> Result<
     (
         Vec<TransactionVerificationData>,
@@ -331,7 +337,7 @@ async fn prepare_incoming_txs(
 
             // If a duplicate is here it is being handled in another batch.
             if !txs_being_handled_locally.try_add_tx(tx_blob_hash) {
-                return None;
+                return reject_in_progress.then_some(Err(IncomingTxError::InProgress));
             }
 
             Some(Ok((tx_blob_hash, tx_blob)))

@@ -289,6 +289,24 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn proof_of_work_multiplication_boundaries_remain_consensus_compatible() {
+        assert!(check_block_pow(&[0xff; 32], 1).is_ok());
+        assert!(check_block_pow(&[0xff; 32], 2).is_err());
+        let mut half = [0xff; 32];
+        half[31] = 0x7f;
+        assert!(check_block_pow(&half, 2).is_ok());
+        half[31] = 0x80;
+        assert!(check_block_pow(&half, 2).is_err());
+        // Little-endian 2^128 times (2^128 - 1) still fits in 256 bits.
+        let mut high = [0; 32];
+        high[16] = 1;
+        assert!(check_block_pow(&high, u128::MAX).is_ok());
+        high[16] = 2;
+        assert!(check_block_pow(&high, u128::MAX).is_err());
+        assert!(check_block_pow(&[0; 32], u128::MAX).is_ok());
+    }
+
     proptest! {
         #[test]
         fn test_check_unique_txs(

@@ -333,6 +333,10 @@ fn backlog(db: &TxpoolDatabase) -> Result<TxpoolReadResponse, TxPoolError> {
             let tx_info: TransactionInfo = bytemuck::pod_read_unaligned(tx_info.as_ref());
 
             Ok(TxEntry {
+                blob_size: snapshot
+                    .get(&db.tx_blobs, &id)?
+                    .ok_or(TxPoolError::NotFound)?
+                    .len(),
                 id: id.as_ref().try_into().unwrap(),
                 weight: tx_info.weight,
                 fee: tx_info.fee,

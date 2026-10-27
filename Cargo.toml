@@ -47,6 +47,7 @@ members = [
 	"helper",
 	"pruning",
 	"test-utils",
+	"vendor/monero-ed25519",
 
 	# Fuzz
 	"fuzz"
@@ -103,7 +104,11 @@ default-members = [
 	"helper",
 	"pruning",
 	"test-utils",
+	"vendor/monero-ed25519",
 ]
+
+[patch.'https://github.com/monero-oxide/monero-oxide.git']
+monero-ed25519 = { path = "vendor/monero-ed25519" }
 
 [profile.release]
 panic         = "abort"
@@ -171,7 +176,7 @@ bytes                 = { version = "1", default-features = false }
 cfg-if                = { version = "1", default-features = false }
 clap                  = { version = "4", default-features = false }
 chrono                = { version = "0.4", default-features = false }
-crypto-bigint         = { version = "0.7", default-features = false }
+crypto-bigint         = { version = "0.7.10", default-features = false }
 crossbeam             = { version = "0.8", default-features = false }
 const_format          = { version = "0.2", default-features = false }
 curve25519-dalek      = { version = "4", default-features = false, features = ["alloc", "zeroize"] }

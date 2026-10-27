@@ -5,6 +5,45 @@ use super::*;
 use crate::txpool::dandelion::tx_store::TxStoreService;
 
 #[tokio::test]
+async fn concurrent_wallet_submission_is_not_reported_as_accepted() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = fjall::Database::builder(directory.path()).open().unwrap();
+    let workers = Arc::new(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap(),
+    );
+    let (mut read, _write) = init_with_pool(database, workers).unwrap();
+    let tracker = TxsBeingHandled::new();
+    let fixture: TransactionVerificationData = TX_V2_RCT3.clone().try_into().unwrap();
+    let blob = Bytes::from(fixture.tx_blob);
+    let mut in_progress = tracker.local_tracker();
+    assert!(in_progress.try_add_tx(transaction_blob_hash(&blob)));
+    assert!(matches!(
+        prepare_incoming_txs(vec![blob.clone()], tracker.clone(), &mut read, true).await,
+        Err(IncomingTxError::InProgress)
+    ));
+    // Repeated network announcements remain harmless, rather than banning a peer.
+    assert!(
+        prepare_incoming_txs(vec![blob.clone()], tracker.clone(), &mut read, false)
+            .await
+            .unwrap()
+            .0
+            .is_empty()
+    );
+    drop(in_progress);
+    assert_eq!(
+        prepare_incoming_txs(vec![blob], tracker, &mut read, true)
+            .await
+            .unwrap()
+            .0
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn stored_private_origin_blocks_echo_before_any_in_memory_local_marker() {
     for relay in [
         TxRelay::LocalI2pOnly,

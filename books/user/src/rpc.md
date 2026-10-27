@@ -87,7 +87,7 @@ Aliases are listed with their canonical endpoint.
 | `/out_peers`                   | ⚪     |
 | `/pop_blocks`                  | ⚪     |
 | `/save_bc`                     | ⚪     |
-| `/send_raw_transaction`, `/sendrawtransaction` | 🟣     | `do_not_relay` is incomplete |
+| `/send_raw_transaction`, `/sendrawtransaction` | 🟣     | `do_not_relay=true` is explicitly rejected; see submission safeguards below |
 | `/set_bootstrap_daemon`        | ⚪     |
 | `/set_limit`                   | ⚪     |
 | `/set_log_categories`          | ⚪     |
@@ -97,6 +97,34 @@ Aliases are listed with their canonical endpoint.
 | `/stop_daemon`                 | 🟠     |
 | `/stop_mining`                 | ⚫     | `cuprated` does not mine |
 | `/update`                      | ⚫     |
+
+## Transaction submission safeguards
+
+`/send_raw_transaction` and its alias reject `do_not_relay=true` on both the
+restricted and administrative listeners, returning a failed response with
+`not_relayed=true` and an explanatory reason. No transaction is submitted by
+that request. Persisted no-relay storage is not implemented; the flag must never
+be silently treated as permission to broadcast.
+
+A successful submission waits for actual insertion into the local pool (or a
+confirmed already-known transaction), not merely an internal queue. Pool key-image
+conflicts return `double_spend=true`; full-pool and concurrent-verification
+failures do not return success. A wallet may retry a concurrent-verification
+failure after the other request finishes. Success is not a guarantee of network
+delivery, mining, or persistence across a power failure.
+
+`storage.txpool.max_txpool_byte_size` limits serialized transaction bytes across
+the public and private pools together, including queued I2P-only transactions.
+It does not cap the entire process's RAM or database/compaction overhead. Zero
+rejects all new transactions. A full pool rejects new transactions without
+evicting existing ones or changing their relay policy. Block inclusion and normal
+public-pool expiry free capacity. Private queues remain bounded by the same
+global byte limit, but are not automatically expired or broadcast to make room.
+
+If a saved pool exceeds the configured cap, startup fails without deleting or
+relaying its contents. Restore a sufficient cap before restarting. There is no
+transaction-pool database format change, and queued I2P-only policies remain
+unchanged across upgrades and restarts.
 
 ## Binary endpoints
 Aliases are listed with their canonical endpoint.

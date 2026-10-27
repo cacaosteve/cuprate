@@ -156,6 +156,88 @@ async fn real_rpc_dispatch_reports_live_peers_and_redacts_the_public_listener() 
     let public_handler = CupratedRpcHandler::new(true, tx_handler, &launch);
     let admin = init_rpc_router(admin_handler.clone(), 1024 * 1024, Duration::from_secs(5));
     let public = init_rpc_router(public_handler.clone(), 1024 * 1024, Duration::from_secs(5));
+    let complete: cuprate_types::TransactionVerificationData = cuprate_test_utils::data::TX_V2_RCT3
+        .clone()
+        .try_into()
+        .unwrap();
+    let mut overflow = complete.tx.clone();
+    let monero_oxide::transaction::Input::ToKey { key_offsets, .. } =
+        &mut overflow.prefix_mut().inputs[0]
+    else {
+        panic!("expected key input")
+    };
+    key_offsets.fill(0);
+    key_offsets[0] = u64::MAX;
+    key_offsets[1] = 1;
+    for router in [&admin, &public] {
+        let response = json_request(
+            router,
+            "/send_raw_transaction",
+            serde_json::json!({
+                "tx_as_hex": hex::encode(overflow.serialize()),
+                "do_not_relay": false,
+                "do_sanity_checks": true
+            }),
+        )
+        .await;
+        assert_eq!(response["status"], "Failed");
+        assert_eq!(response["sanity_check_failed"], true);
+        assert_eq!(response["not_relayed"], true);
+        assert!(response["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Ring offset sum overflow"));
+    }
+    // Both aliases and both listeners must fail closed before parsing or admission.
+    for router in [&admin, &public] {
+        for uri in ["/send_raw_transaction", "/sendrawtransaction"] {
+            for blob in [vec![0xff; 64], complete.tx_blob.clone()] {
+                let response = json_request(
+                    router,
+                    uri,
+                    serde_json::json!({
+                        "tx_as_hex": hex::encode(blob),
+                        "do_not_relay": true,
+                        "do_sanity_checks": false
+                    }),
+                )
+                .await;
+                assert_eq!(response["status"], "Failed");
+                assert_eq!(response["not_relayed"], true);
+                assert!(response["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("do_not_relay is not supported"));
+            }
+        }
+    }
+    assert!(matches!(
+        admin_handler
+            .tx_handler
+            .clone()
+            .oneshot(crate::txpool::IncomingTxs {
+                origin: None,
+                txs: vec![bytes::Bytes::from_static(&[0xff; 64])],
+                state: cuprate_dandelion_tower::TxState::Local,
+                drop_relay_rule_errors: false,
+                do_not_relay: true,
+            })
+            .await,
+        Err(crate::txpool::IncomingTxError::DoNotRelayUnsupported)
+    ));
+    assert!(matches!(
+        launch
+            .txpool_read
+            .clone()
+            .oneshot(
+                cuprate_txpool::service::interface::TxpoolReadRequest::Size {
+                    include_sensitive_txs: true
+                }
+            )
+            .await
+            .unwrap(),
+        cuprate_txpool::service::interface::TxpoolReadResponse::Size(0)
+    ));
     let zero = json_request(&admin, "/get_info", serde_json::json!({})).await;
     assert_eq!(zero["incoming_connections_count"], 0);
     assert_eq!(zero["outgoing_connections_count"], 0);

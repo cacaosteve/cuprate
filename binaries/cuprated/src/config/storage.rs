@@ -55,7 +55,10 @@ config_struct! {
     #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
     #[serde(deny_unknown_fields, default)]
     pub struct TxpoolConfig {
-        /// The maximum size of the tx-pool.
+        /// The maximum serialized transaction bytes in the entire pool, including
+        /// private/I2P-only transactions. New submissions are rejected when full;
+        /// accepted private transactions are never evicted or relayed to make room.
+        /// Startup fails without deleting data if the saved pool exceeds this cap.
         ///
         /// Type         | Number
         /// Valid values | >= 0

@@ -374,7 +374,7 @@ async fn send_raw_transaction(
         invalid_output: false,
         low_mixin: false,
         nonzero_unlock_time: false,
-        not_relayed: request.do_not_relay,
+        not_relayed: true,
         overspend: false,
         reason: String::new(),
         sanity_check_failed: false,
@@ -385,6 +385,11 @@ async fn send_raw_transaction(
 
     // Default to failed, if all checks pass we set this to Ok.
     resp.base.response_base.status = Status::Failed;
+    // Reject before parsing, verification, pool mutation, or relay, on both listeners.
+    if request.do_not_relay {
+        resp.reason = crate::txpool::IncomingTxError::DoNotRelayUnsupported.to_string();
+        return Ok(resp);
+    }
     let Ok(tx) = Transaction::read(&mut request.tx_as_hex.as_slice()) else {
         return Ok(resp);
     };
@@ -418,16 +423,19 @@ async fn send_raw_transaction(
                         }
 
                         /// <https://github.com/monero-project/monero/blob/893916ad091a92e765ce3241b94e706ad012b62a/src/cryptonote_basic/cryptonote_format_utils.cpp#L1526>
-                        fn relative_output_offsets_to_absolute(mut offsets: Vec<u64>) -> Vec<u64> {
+                        fn relative_output_offsets_to_absolute(
+                            mut offsets: Vec<u64>,
+                        ) -> Option<Vec<u64>> {
                             for i in 1..offsets.len() {
-                                offsets[i] += offsets[i - 1];
+                                offsets[i] = offsets[i].checked_add(offsets[i - 1])?;
                             }
 
-                            offsets
+                            Some(offsets)
                         }
 
                         n_indices += key_offsets.len();
-                        let absolute = relative_output_offsets_to_absolute(key_offsets.clone());
+                        let absolute = relative_output_offsets_to_absolute(key_offsets.clone())
+                            .ok_or_else(|| "Ring offset sum overflow".to_owned())?;
                         rct_indices.extend(absolute);
                     }
                 }
@@ -466,15 +474,6 @@ async fn send_raw_transaction(
         }
     }
 
-    if state.is_restricted() && request.do_not_relay {
-        // FIXME: implement something like `/check_tx` in `cuprated/monerod`.
-        // boog900:
-        // > making nodes hold txs in their pool that don't get passed
-        // > around the network can cause issues, like targeted tx pool double spends
-        // > there is also no reason to have this for public RPC
-        return Err(anyhow!("do_not_relay is not supported on restricted RPC"));
-    }
-
     let txs = vec![tx.serialize().into()];
 
     let txs = IncomingTxs {
@@ -485,10 +484,21 @@ async fn send_raw_transaction(
         do_not_relay: request.do_not_relay,
     };
 
-    let tx_relay_checks = tx_handler::handle_incoming_txs(&mut state.tx_handler, txs).await?;
+    let tx_relay_checks = match tx_handler::handle_incoming_txs(&mut state.tx_handler, txs).await {
+        Ok(checks) => checks,
+        Err(
+            error @ (crate::txpool::IncomingTxError::PoolFull
+            | crate::txpool::IncomingTxError::InProgress),
+        ) => {
+            resp.reason = error.to_string();
+            return Ok(resp);
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     if tx_relay_checks.is_empty() {
         resp.base.response_base.status = Status::Ok;
+        resp.not_relayed = false;
         return Ok(resp);
     }
 
@@ -524,6 +534,8 @@ async fn send_raw_transaction(
             add_reason(&mut reasons, reason);
         }
     }
+
+    resp.reason = reasons;
 
     Ok(resp)
 }

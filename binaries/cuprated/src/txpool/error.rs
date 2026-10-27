@@ -22,6 +22,27 @@ pub(crate) enum IncomingTxError {
     #[error("Duplicate tx in message.")]
     DuplicateTransaction,
 
+    /// Reject unsupported no-relay semantics rather than silently broadcasting.
+    #[error("do_not_relay is not supported; transaction was not submitted")]
+    DoNotRelayUnsupported,
+
+    /// The transaction conflicts with an existing transaction in the pool.
+    #[error("Transaction double spends a key image in the pool")]
+    PoolDoubleSpend,
+
+    /// The configured pool capacity would be exceeded.
+    #[error("Transaction pool byte limit reached; transaction was not accepted")]
+    PoolFull,
+
+    /// A concurrent submission is still being verified; its outcome is not known yet.
+    #[error("Transaction is already being processed; retry after verification completes")]
+    InProgress,
+
+    /// The manager could not complete insertion or initial relay setup. The
+    /// transaction might already be stored; never report false success on error.
+    #[error("Transaction pool submission failed: {0}")]
+    PoolSubmissionFailed(String),
+
     /// A relay rule was broken.
     #[error("Relay rule was broken: {0}")]
     RelayRule(#[from] RelayRuleError),

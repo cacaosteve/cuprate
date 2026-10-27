@@ -9,6 +9,380 @@ use super::*;
 use crate::txpool::dandelion::tx_store::TxStoreService;
 
 #[tokio::test]
+async fn submission_waits_for_admission_and_never_turns_failure_into_success() {
+    for outcome in [
+        Ok(TxAdmission::Inserted),
+        Ok(TxAdmission::AlreadyKnown),
+        Ok(TxAdmission::DoubleSpend),
+        Ok(TxAdmission::Full),
+        Err("injected storage failure".to_owned()),
+    ] {
+        let (command_tx, mut commands) = mpsc::channel(1);
+        let (spent_kis_tx, _) = mpsc::channel(1);
+        let handle = TxpoolManagerHandle {
+            command_tx,
+            spent_kis_tx,
+        };
+        let mut pending =
+            Box::pin(handle.submit(TX_V2_RCT3.clone().try_into().unwrap(), TxState::Local, None));
+        assert!(futures::poll!(&mut pending).is_pending());
+        let TxpoolManagerCommand::IncomingTx(_, _, _, response) = commands.recv().await.unwrap()
+        else {
+            panic!("wrong command")
+        };
+        assert!(
+            futures::poll!(&mut pending).is_pending(),
+            "enqueueing is not acceptance"
+        );
+        let expected = outcome.clone();
+        response.send(outcome).unwrap();
+        let result = pending.await;
+        match expected {
+            Ok(TxAdmission::Inserted) => assert_eq!(result.unwrap(), TxAdmission::Inserted),
+            Ok(TxAdmission::AlreadyKnown) => assert_eq!(result.unwrap(), TxAdmission::AlreadyKnown),
+            Ok(TxAdmission::DoubleSpend) => {
+                assert!(matches!(result, Err(IncomingTxError::PoolDoubleSpend)));
+            }
+            Ok(TxAdmission::Full) => assert!(matches!(result, Err(IncomingTxError::PoolFull))),
+            Err(_) => assert!(matches!(
+                result,
+                Err(IncomingTxError::PoolSubmissionFailed(_))
+            )),
+        }
+    }
+    let (command_tx, mut commands) = mpsc::channel(1);
+    let (spent_kis_tx, _) = mpsc::channel(1);
+    let handle = TxpoolManagerHandle {
+        command_tx,
+        spent_kis_tx,
+    };
+    let mut pending =
+        Box::pin(handle.submit(TX_V2_RCT3.clone().try_into().unwrap(), TxState::Local, None));
+    assert!(futures::poll!(&mut pending).is_pending());
+    drop(commands.recv().await.unwrap());
+    assert!(matches!(pending.await, Err(IncomingTxError::ChannelClosed)));
+}
+
+// The manager receives already-verified transactions. Use real serialized fixtures
+// and isolated databases; no transaction is sent to a live chain or peer.
+struct PoolFixture {
+    _directory: tempfile::TempDir,
+    manager: TxpoolManagerHandle,
+    read: TxpoolReadHandle,
+    executor: TaskExecutor,
+    dandelion: DandelionPoolService<DandelionTx, TxId, CrossNetworkInternalPeerId>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl PoolFixture {
+    async fn new(
+        cap: usize,
+        mode: LocalTxRelayMode,
+        seed: Option<(TransactionVerificationData, TxRelay)>,
+    ) -> Result<Self, FatalError> {
+        let directory = tempfile::tempdir().unwrap();
+        let database = fjall::Database::builder(directory.path()).open().unwrap();
+        let workers = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .unwrap(),
+        );
+        let (read, mut write) = init_with_pool(database, workers).unwrap();
+        if let Some((tx, relay)) = seed {
+            write
+                .ready()
+                .await
+                .unwrap()
+                .call(TxpoolWriteRequest::AddTransaction {
+                    tx: Box::new(tx),
+                    state_stem: true,
+                    relay,
+                })
+                .await
+                .unwrap();
+        }
+        let (promote_tx, promote_rx) = mpsc::unbounded_channel();
+        let router = tower::service_fn(
+            |_: cuprate_dandelion_tower::DandelionRouteReq<
+                DandelionTx,
+                CrossNetworkInternalPeerId,
+            >| {
+                std::future::ready(Ok::<_, cuprate_dandelion_tower::DandelionRouterError>(
+                    State::Stem,
+                ))
+            },
+        );
+        let (dandelion, task) = cuprate_dandelion_tower::pool::start_dandelion_pool_manager(
+            8,
+            router,
+            TxStoreService {
+                txpool_read_handle: read.clone(),
+                txpool_write_handle: write.clone(),
+                promote_tx,
+            },
+            cuprate_dandelion_tower::DandelionConfig {
+                time_between_hop: Duration::from_secs(175),
+                epoch_duration: Duration::from_mins(10),
+                fluff_probability: 0.12,
+                graph: cuprate_dandelion_tower::Graph::FourRegular,
+            },
+        );
+        let executor = TaskExecutor::new();
+        let result = start_txpool_manager(
+            write,
+            read.clone(),
+            promote_rx,
+            DiffuseService {
+                clear_net_broadcast_service: BroadcastSvc::mock(),
+            },
+            dandelion.clone(),
+            TxpoolConfig {
+                max_txpool_byte_size: cap,
+                ..Default::default()
+            },
+            executor.clone(),
+            mode,
+        )
+        .await;
+        let manager = match result {
+            Ok(manager) => manager,
+            Err(error) => {
+                drop(dandelion);
+                task.await.unwrap();
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            _directory: directory,
+            manager,
+            read,
+            executor,
+            dandelion,
+            task,
+        })
+    }
+
+    async fn close(self) {
+        self.executor.trigger_shutdown();
+        assert!(matches!(
+            self.executor.wait_for_shutdown().await,
+            crate::monitor::ShutdownReason::Requested
+        ));
+        drop((self.manager, self.dandelion));
+        self.task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn real_pool_conflict_is_reported_and_does_not_increment_acceptance() {
+    let pool = PoolFixture::new(100_000_000, LocalTxRelayMode::Clearnet, None)
+        .await
+        .unwrap();
+    let original: TransactionVerificationData = TX_V2_RCT3.clone().try_into().unwrap();
+    let source = cuprate_p2p_core::TransactionCounters::default();
+    assert_eq!(
+        pool.manager
+            .submit(original.clone(), TxState::Fluff, Some(source.clone()))
+            .await
+            .unwrap(),
+        TxAdmission::Inserted
+    );
+    // Simulate a distinct verified transaction using the same key images. Only
+    // the manager layer is under test, not cryptographic transaction validation.
+    let mut conflict = original.clone();
+    conflict.tx_hash[0] ^= 1;
+    assert!(matches!(
+        pool.manager
+            .submit(conflict, TxState::Fluff, Some(source.clone()))
+            .await,
+        Err(IncomingTxError::PoolDoubleSpend)
+    ));
+    assert_eq!(source.snapshot().accepted, 1);
+    let TxpoolReadResponse::Backlog(backlog) = pool
+        .read
+        .clone()
+        .oneshot(TxpoolReadRequest::Backlog)
+        .await
+        .unwrap()
+    else {
+        panic!("wrong response")
+    };
+    assert_eq!(backlog.len(), 1);
+    assert_eq!(backlog[0].blob_size, original.tx_blob.len());
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn capacity_counts_private_transactions_and_is_freed_by_block_inclusion() {
+    let original: TransactionVerificationData = TX_V2_RCT3.clone().try_into().unwrap();
+    let next: TransactionVerificationData = cuprate_test_utils::data::TX_V1_SIG2
+        .clone()
+        .try_into()
+        .unwrap();
+    let cap = original.tx_blob.len().max(next.tx_blob.len());
+    for mode in [
+        LocalTxRelayMode::Clearnet,
+        LocalTxRelayMode::I2pOnly,
+        LocalTxRelayMode::I2pThenClearnet,
+    ] {
+        let pool = PoolFixture::new(cap, mode, None).await.unwrap();
+        assert_eq!(
+            pool.manager
+                .submit(original.clone(), TxState::Local, None)
+                .await
+                .unwrap(),
+            TxAdmission::Inserted
+        );
+        assert_eq!(
+            pool.manager
+                .submit(original.clone(), TxState::Local, None)
+                .await
+                .unwrap(),
+            TxAdmission::AlreadyKnown
+        );
+        assert!(matches!(
+            pool.manager
+                .submit(next.clone(), TxState::Local, None)
+                .await,
+            Err(IncomingTxError::PoolFull)
+        ));
+        let TxpoolReadResponse::TxBlob { relay, .. } = pool
+            .read
+            .clone()
+            .oneshot(TxpoolReadRequest::TxBlob(original.tx_hash))
+            .await
+            .unwrap()
+        else {
+            panic!("wrong response")
+        };
+        assert_eq!(
+            relay,
+            match mode {
+                LocalTxRelayMode::Clearnet => TxRelay::Local,
+                LocalTxRelayMode::I2pOnly => TxRelay::LocalI2pOnly,
+                LocalTxRelayMode::I2pThenClearnet => TxRelay::LocalI2pThenClearnet,
+            }
+        );
+        pool.manager
+            .new_block(
+                original
+                    .tx
+                    .prefix()
+                    .inputs
+                    .iter()
+                    .map(|input| match input {
+                        monero_oxide::transaction::Input::ToKey { key_image, .. } => {
+                            key_image.to_bytes()
+                        }
+                        monero_oxide::transaction::Input::Gen(_) => unreachable!(),
+                    })
+                    .collect(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            pool.manager
+                .submit(next.clone(), TxState::Local, None)
+                .await
+                .unwrap(),
+            TxAdmission::Inserted
+        );
+        pool.close().await;
+    }
+}
+
+#[tokio::test]
+async fn concurrent_submissions_cannot_overbook_the_pool() {
+    let first: TransactionVerificationData = TX_V2_RCT3.clone().try_into().unwrap();
+    let second: TransactionVerificationData = cuprate_test_utils::data::TX_V1_SIG2
+        .clone()
+        .try_into()
+        .unwrap();
+    let cap = first.tx_blob.len().max(second.tx_blob.len());
+    let pool = PoolFixture::new(cap, LocalTxRelayMode::I2pOnly, None)
+        .await
+        .unwrap();
+    let source = cuprate_p2p_core::TransactionCounters::default();
+    let (a, b) = tokio::join!(
+        pool.manager
+            .submit(first, TxState::Local, Some(source.clone())),
+        pool.manager
+            .submit(second, TxState::Local, Some(source.clone())),
+    );
+    assert!(matches!(
+        (&a, &b),
+        (Ok(TxAdmission::Inserted), Err(IncomingTxError::PoolFull))
+            | (Err(IncomingTxError::PoolFull), Ok(TxAdmission::Inserted))
+    ));
+    let TxpoolReadResponse::Backlog(backlog) = pool
+        .read
+        .clone()
+        .oneshot(TxpoolReadRequest::Backlog)
+        .await
+        .unwrap()
+    else {
+        panic!("wrong response")
+    };
+    assert!(backlog.iter().map(|tx| tx.blob_size).sum::<usize>() <= cap);
+    assert_eq!(backlog.len(), 1);
+    assert_eq!(backlog[0].relay, TxRelay::LocalI2pOnly);
+    assert_eq!(source.snapshot().accepted, 1);
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn zero_and_exact_capacity_and_saved_private_pool_are_enforced() {
+    let tx: TransactionVerificationData = TX_V2_RCT3.clone().try_into().unwrap();
+    for cap in [0, tx.tx_blob.len() - 1, tx.tx_blob.len()] {
+        let pool = PoolFixture::new(cap, LocalTxRelayMode::I2pOnly, None)
+            .await
+            .unwrap();
+        let result = pool.manager.submit(tx.clone(), TxState::Local, None).await;
+        if cap == tx.tx_blob.len() {
+            assert_eq!(result.unwrap(), TxAdmission::Inserted);
+        } else {
+            assert!(matches!(result, Err(IncomingTxError::PoolFull)));
+        }
+        pool.close().await;
+    }
+    let pool = PoolFixture::new(
+        tx.tx_blob.len(),
+        LocalTxRelayMode::Clearnet,
+        Some((tx.clone(), TxRelay::LocalI2pOnly)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        pool.manager
+            .submit(tx.clone(), TxState::Local, None)
+            .await
+            .unwrap(),
+        TxAdmission::AlreadyKnown
+    );
+    let next: TransactionVerificationData = cuprate_test_utils::data::TX_V1_SIG2
+        .clone()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        pool.manager.submit(next, TxState::Local, None).await,
+        Err(IncomingTxError::PoolFull)
+    ));
+    pool.close().await;
+    let result = PoolFixture::new(
+        tx.tx_blob.len() - 1,
+        LocalTxRelayMode::Clearnet,
+        Some((tx, TxRelay::LocalI2pOnly)),
+    )
+    .await;
+    assert!(result
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("persisted transaction pool"));
+}
+
+#[tokio::test]
 async fn acceptance_requires_new_pool_insertion_and_preserves_source_even_for_fluff() {
     for local in [false, true] {
         let directory = tempfile::tempdir().unwrap();
@@ -71,26 +445,22 @@ async fn acceptance_requires_new_pool_insertion_and_preserves_source_even_for_fl
         };
         let origin = if local { None } else { Some(source.clone()) };
         manager
-            .command_tx
-            .send(TxpoolManagerCommand::IncomingTx(
-                TX_V2_RCT3.clone().try_into().unwrap(),
-                state,
-                origin,
-            ))
+            .submit(TX_V2_RCT3.clone().try_into().unwrap(), state, origin)
             .await
             .unwrap();
         for origin in [source.clone(), echo_source.clone()] {
-            // Concurrent verification/peer echoes can queue the same tx again. The DB must
-            // reject that insertion, and neither source may gain another accepted count.
-            manager
-                .command_tx
-                .send(TxpoolManagerCommand::IncomingTx(
-                    TX_V2_RCT3.clone().try_into().unwrap(),
-                    TxState::Fluff,
-                    Some(origin),
-                ))
-                .await
-                .unwrap();
+            // Already-known transactions succeed idempotently, but never gain another count.
+            assert_eq!(
+                manager
+                    .submit(
+                        TX_V2_RCT3.clone().try_into().unwrap(),
+                        TxState::Fluff,
+                        Some(origin),
+                    )
+                    .await
+                    .unwrap(),
+                TxAdmission::AlreadyKnown
+            );
         }
         // FIFO command barrier: count only after all DB writes have actually completed.
         let (response_tx, response_rx) = oneshot::channel();

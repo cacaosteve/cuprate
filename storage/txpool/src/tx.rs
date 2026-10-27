@@ -33,6 +33,8 @@ impl TxRelay {
 pub struct TxEntry {
     /// The transaction's ID (hash).
     pub id: [u8; 32],
+    /// The serialized transaction's size, used for pool capacity accounting.
+    pub blob_size: usize,
     /// The transaction's weight.
     pub weight: usize,
     /// The transaction's fee.
