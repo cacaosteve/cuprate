@@ -11,7 +11,7 @@ use futures::{
 };
 use tokio::{
     sync::{mpsc, OwnedSemaphorePermit},
-    task::JoinHandle,
+    task::{JoinError, JoinHandle},
     time::{sleep, timeout, Sleep},
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -28,6 +28,22 @@ use crate::{
 
 #[cfg(test)]
 mod transaction_counter_tests;
+
+#[cfg(test)]
+mod shutdown_tests;
+
+/// A completed timeout monitor always closes its connection. Runtime teardown can
+/// cancel the monitor before the connection is dropped, so cancellation is normal
+/// close control flow, not a reason to panic (and abort the release binary).
+/// Preserve actual monitor failures, including a task panic under unwinding.
+fn timeout_monitor_error(result: Result<Result<(), tower::BoxError>, JoinError>) -> PeerError {
+    match result {
+        Ok(Ok(())) => PeerError::ConnectionClosed,
+        Ok(Err(error)) => PeerError::ServiceError(error),
+        Err(error) if error.is_cancelled() => PeerError::ConnectionClosed,
+        Err(error) => PeerError::ServiceError(error.into()),
+    }
+}
 
 /// Count actual sends, not queue submissions. A notification has no peer acknowledgement.
 async fn send_message<S>(
@@ -296,8 +312,7 @@ where
             }
             res = &mut self.timeout_handle => {
                 tracing::debug!("timeout task has shutdown, shutting down connection.");
-                res.unwrap()?;
-                Err(PeerError::ConnectionClosed)
+                Err(timeout_monitor_error(res))
             }
             broadcast_req = self.broadcast_stream.next() => {
                 if let Some(broadcast_req) = broadcast_req {
@@ -340,8 +355,7 @@ where
             }
             res = &mut self.timeout_handle => {
                 tracing::debug!("timeout task has shutdown, shutting down connection.");
-                res.unwrap()?;
-                Err(PeerError::ConnectionClosed)
+                Err(timeout_monitor_error(res))
             }
             () = self.request_timeout.as_mut().expect("Request timeout was not set!") => {
                 Err(PeerError::ClientChannelClosed)
