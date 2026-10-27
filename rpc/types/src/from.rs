@@ -51,11 +51,19 @@ impl<A: NetZoneAddress> From<ConnectionInfo<A>> for crate::misc::ConnectionInfo 
     fn from(x: ConnectionInfo<A>) -> Self {
         let (ip, port) = match x.socket_addr {
             Some(socket) => (socket.ip().to_string(), socket.port().to_string()),
-            None => (String::new(), String::new()),
+            None => (
+                String::new(),
+                x.address
+                    .map(|address| address.into().port().to_string())
+                    .unwrap_or_default(),
+            ),
         };
 
         Self {
-            address: x.address.to_string(),
+            address: x
+                .address
+                .map(|address| address.to_string())
+                .unwrap_or_default(),
             address_type: x.address_type,
             avg_download: x.avg_download,
             avg_upload: x.avg_upload,
@@ -69,7 +77,7 @@ impl<A: NetZoneAddress> From<ConnectionInfo<A>> for crate::misc::ConnectionInfo 
             live_time: x.live_time,
             localhost: x.localhost,
             local_ip: x.local_ip,
-            peer_id: hex::encode(x.peer_id.to_ne_bytes()),
+            peer_id: hex::encode(x.peer_id.to_be_bytes()),
             port,
             pruning_seed: x.pruning_seed.compress(),
             recv_count: x.recv_count,

@@ -2,6 +2,7 @@ use std::{
     fmt::{Debug, Display, Formatter},
     sync::{Arc, Mutex},
     task::{ready, Context, Poll},
+    time::Instant,
 };
 
 use futures::channel::oneshot;
@@ -22,6 +23,7 @@ use crate::{
 mod connection;
 mod connector;
 pub mod handshaker;
+mod info;
 mod request_handler;
 mod sync_callback;
 mod timeout_monitor;
@@ -52,6 +54,8 @@ impl<A: Display> Display for InternalPeerID<A> {
 /// Information on a connected peer.
 #[derive(Debug, Clone)]
 pub struct PeerInformation<A> {
+    /// When this connection completed its handshake (monotonic clock).
+    pub connected_at: Instant,
     /// The internal peer ID of this peer.
     pub id: InternalPeerID<A>,
     /// The [`ConnectionHandle`] for this peer, allows banning this peer and checking if it is still

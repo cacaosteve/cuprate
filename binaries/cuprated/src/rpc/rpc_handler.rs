@@ -40,6 +40,9 @@ pub(crate) struct CupratedRpcHandler {
     /// Is the node running offline?
     pub offline: bool,
 
+    /// Live query handles for all initialized P2P zones.
+    pub peers: super::PeerServices,
+
     /// Read handle to the blockchain database.
     pub blockchain_read: BlockchainReadHandle,
 
@@ -80,6 +83,7 @@ impl CupratedRpcHandler {
             restricted,
             network: launch_ctx.config.network,
             offline: launch_ctx.config.offline,
+            peers: launch_ctx.peers.clone(),
             tx_handler,
             blockchain_read: launch_ctx.blockchain.read(),
             blockchain_context: launch_ctx.blockchain.context_svc(),

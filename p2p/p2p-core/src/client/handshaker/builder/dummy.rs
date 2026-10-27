@@ -108,7 +108,7 @@ impl<N: NetworkZone> Service<AddressBookRequest<N>> for DummyAddressBook {
                 unban_instant: None,
             },
             AddressBookRequest::OwnAddress => AddressBookResponse::OwnAddress(None),
-            AddressBookRequest::Peerlist
+            AddressBookRequest::Peerlist { .. }
             | AddressBookRequest::PeerlistSize
             | AddressBookRequest::ConnectionCount
             | AddressBookRequest::SetBan(_)

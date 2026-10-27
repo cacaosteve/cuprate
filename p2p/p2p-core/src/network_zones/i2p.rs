@@ -28,6 +28,7 @@ pub struct I2p;
 
 impl NetworkZone for I2p {
     const NAME: &'static str = "I2P";
+    const ANONYMOUS_ADDRESS_TYPE: cuprate_types::AddressType = cuprate_types::AddressType::I2p;
     const CHECK_NODE_ID: bool = false;
     const BROADCAST_OWN_ADDR: bool = true;
     type Addr = I2pAddr;

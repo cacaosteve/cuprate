@@ -1,18 +1,17 @@
 //! Functions to send [`AddressBookRequest`]s.
 
-use std::net::SocketAddrV4;
-
 use anyhow::{anyhow, Error};
 use tower::ServiceExt;
 
 use cuprate_helper::map::u32_from_ipv4;
 use cuprate_p2p_core::{
     services::{AddressBookRequest, AddressBookResponse, ZoneSpecificPeerListEntryBase},
-    types::{BanState, ConnectionId},
+    types::BanState,
     AddressBook, NetworkZone,
 };
 use cuprate_rpc_types::misc::ConnectionInfo;
 use cuprate_types::rpc::Peer;
+use cuprate_wire::NetworkAddress;
 
 // FIXME: use `anyhow::Error` over `tower::BoxError` in address book.
 
@@ -31,46 +30,7 @@ pub(crate) async fn connection_info<Z: NetworkZone>(
         unreachable!();
     };
 
-    // FIXME: impl this map somewhere instead of inline.
-    let vec = vec
-        .into_iter()
-        .map(|info| {
-            let (ip, port) = match info.socket_addr {
-                Some(socket) => (socket.ip().to_string(), socket.port().to_string()),
-                None => (String::new(), String::new()),
-            };
-
-            ConnectionInfo {
-                address: info.address.to_string(),
-                address_type: info.address_type,
-                avg_download: info.avg_download,
-                avg_upload: info.avg_upload,
-                connection_id: String::from(ConnectionId::DEFAULT_STR),
-                current_download: info.current_download,
-                current_upload: info.current_upload,
-                height: info.height,
-                host: info.host,
-                incoming: info.incoming,
-                ip,
-                live_time: info.live_time,
-                localhost: info.localhost,
-                local_ip: info.local_ip,
-                peer_id: hex::encode(info.peer_id.to_ne_bytes()),
-                port,
-                pruning_seed: info.pruning_seed.compress(),
-                recv_count: info.recv_count,
-                recv_idle_time: info.recv_idle_time,
-                rpc_credits_per_hash: info.rpc_credits_per_hash,
-                rpc_port: info.rpc_port,
-                send_count: info.send_count,
-                send_idle_time: info.send_idle_time,
-                state: info.state,
-                support_flags: info.support_flags,
-            }
-        })
-        .collect();
-
-    Ok(vec)
+    Ok(vec.into_iter().map(Into::into).collect())
 }
 
 /// [`AddressBookRequest::SetBan`]
@@ -132,12 +92,13 @@ pub(crate) async fn get_bans<Z: NetworkZone>(
 /// [`AddressBookRequest::Peerlist`]
 pub(crate) async fn peerlist<Z: NetworkZone>(
     address_book: &mut impl AddressBook<Z>,
+    include_blocked: bool,
 ) -> Result<(Vec<Peer>, Vec<Peer>), Error> {
     let AddressBookResponse::Peerlist(peerlist) = address_book
         .ready()
         .await
         .map_err(|e| anyhow!(e))?
-        .call(AddressBookRequest::Peerlist)
+        .call(AddressBookRequest::Peerlist { include_blocked })
         .await
         .map_err(|e| anyhow!(e))?
     else {
@@ -157,12 +118,17 @@ pub(crate) async fn peerlist<Z: NetworkZone>(
                     rpc_credits_per_hash,
                 } = peer;
 
-                let host = adr.to_string();
-
-                let (ip, port) = if let Ok(socket_addr) = host.parse::<SocketAddrV4>() {
-                    (u32_from_ipv4(*socket_addr.ip()), socket_addr.port())
-                } else {
-                    (0, 0)
+                let (host, ip, port) = match adr.into() {
+                    NetworkAddress::Clear(socket) => (
+                        socket.ip().to_string(),
+                        match socket.ip() {
+                            std::net::IpAddr::V4(ip) => u32_from_ipv4(ip),
+                            std::net::IpAddr::V6(_) => 0,
+                        },
+                        socket.port(),
+                    ),
+                    NetworkAddress::Tor(address) => (address.addr_string(), 0, address.port()),
+                    NetworkAddress::I2p(address) => (address.addr_string(), 0, address.port()),
                 };
 
                 let last_seen = last_seen.try_into().unwrap_or(0);

@@ -45,9 +45,9 @@ This section contains the development status of endpoints/methods in `cuprated`.
 | `get_block_headers_range`      | 🟠     |
 | `get_block_template`           | ⚪     |
 | `get_coinbase_tx_sum`          | 🟠     |
-| `get_connections`              | ⚪     |
+| `get_connections`              | 🟣     | Admin-only; see peer diagnostics below |
 | `get_fee_estimate`             | 🟠     |
-| `get_info`                     | 🟣     | Some peer and bootstrap fields are placeholders |
+| `get_info`                     | 🟣     | Real admin peer counts; bootstrap and RPC-connection fields remain placeholders |
 | `get_last_block_header`        | 🟠     |
 | `get_miner_data`               | 🟣     |
 | `get_output_distribution`      | 🟠     |
@@ -70,11 +70,11 @@ Aliases are listed with their canonical endpoint.
 |--------------------------------|--------|-------|
 | `/get_alt_blocks_hashes`       | ⚪     |
 | `/get_height`, `/getheight`    | 🟠     |
-| `/get_info`, `/getinfo`        | 🟣     | Some peer and bootstrap fields are placeholders |
+| `/get_info`, `/getinfo`        | 🟣     | Real admin peer counts; bootstrap and RPC-connection fields remain placeholders |
 | `/get_limit`                   | ⚪     |
 | `/get_net_stats`               | ⚪     |
 | `/get_outs`                    | ⚪     |
-| `/get_peer_list`               | ⚪     |
+| `/get_peer_list`               | 🟣     | Admin-only; last-seen timestamps are not tracked |
 | `/get_public_nodes`            | ⚪     |
 | `/get_transaction_pool`        | ⚪     |
 | `/get_transaction_pool_hashes` | 🟠     |
@@ -109,3 +109,49 @@ Aliases are listed with their canonical endpoint.
 | `/get_o_indexes.bin`                          | 🟠     |
 | `/get_outs.bin`                               | 🟠     |
 | `/get_transaction_pool_hashes.bin`            | 🟠     |
+
+## Private peer diagnostics
+
+Use the **unrestricted administrative RPC** through localhost, a private network,
+or an SSH tunnel. Do not publish this listener or proxy these methods to the
+internet. Restricted RPC rejects `get_connections` and `/get_peer_list`, and
+continues to redact connection counts and peer-list sizes in `get_info`.
+
+On administrative RPC, `get_info` reports the number of handshaken inbound and
+outbound connections and the white/gray peer-list sizes across all initialized
+zones (clearnet, Tor and I2P). Disabled or not-yet-started zones contribute zero;
+zones started after blockchain synchronization become visible automatically.
+Disconnected peers stop contributing to connection counts but may remain in
+the saved peer lists.
+
+For example, with the administrative listener at `127.0.0.1:18081`:
+
+```sh
+curl -fsS http://127.0.0.1:18081/get_info
+curl -fsS http://127.0.0.1:18081/json_rpc \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"get_connections"}'
+curl -fsS http://127.0.0.1:18081/get_peer_list \
+  -H 'Content-Type: application/json' \
+  -d '{"public_only":false,"include_blocked":false}'
+```
+
+`get_connections` lists active, handshaken connections with their direction,
+address type, known address, current peer height, connection age, peer ID,
+pruning seed and advertised RPC/support information. Address types are 1=IPv4,
+2=IPv6, 3=I2P and 4=Tor. Incoming anonymous connections whose destination is
+unknown have empty address/host/IP/port fields; the local proxy address is never
+substituted for a peer identity. Peer IDs on anonymous networks are not unique.
+
+The byte counts, rates, idle times and connection UUID fields are **not yet
+tracked** and retain the schema's zero sentinels; zero in these fields is not
+evidence of an idle connection. `state` is `normal` for handshaken connections;
+Cuprate does not use monerod's per-connection synchronization state machine.
+
+`/get_peer_list` lists known peers, not active connections. `public_only` defaults
+to `true` (clearnet only); set it to `false` to include Tor and I2P. This option
+does not bypass administrative authorization. `include_blocked` defaults to
+`false` and filters any retained blocked entries; normal banning purges entries,
+so this is not a history of banned peers. Last-seen timestamps are not tracked
+and remain zero. No transaction IDs or transaction/peer timing correlations are
+added by these diagnostics.

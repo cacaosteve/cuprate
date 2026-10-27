@@ -246,6 +246,7 @@ pub(crate) fn initialize_tor_p2p(
         };
 
         // Publish the Tor interface for consumers
+        launch_ctx.peers.set_tor(&tor_interface);
         drop(interface_publisher.send(tor_interface.clone()));
 
         // Send the tx handler to the Tor zone
@@ -302,6 +303,7 @@ pub(crate) fn initialize_i2p_p2p(
             return;
         };
 
+        launch_ctx.peers.set_i2p(&i2p_interface);
         drop(interface_publisher.send(i2p_interface.clone()));
         drop(dandelion_publisher.send(i2p_interface));
         if i2p_tx_handler_tx.send(tx_handler).is_err() {

@@ -4,10 +4,12 @@
 
 mod constants;
 mod handlers;
+mod peers;
 mod rpc_handler;
 mod server;
 mod service;
 mod timeout;
 
+pub(crate) use peers::PeerServices;
 pub(crate) use rpc_handler::CupratedRpcHandler;
 pub(crate) use server::init_rpc_servers;

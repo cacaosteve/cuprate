@@ -4,8 +4,7 @@ use cuprate_pruning::{PruningError, PruningSeed};
 use cuprate_wire::{CoreSyncData, PeerListEntryBase};
 
 use crate::{
-    client::InternalPeerID,
-    handles::ConnectionHandle,
+    client::{InternalPeerID, PeerInformation},
     types::{BanState, ConnectionInfo, Peerlist, SetBan},
     NetZoneAddress, NetworkAddressIncorrectZone, NetworkZone,
 };
@@ -75,20 +74,10 @@ impl<A: NetZoneAddress> TryFrom<PeerListEntryBase> for ZoneSpecificPeerListEntry
 pub enum AddressBookRequest<Z: NetworkZone> {
     /// Tells the address book that we have connected or received a connection from a peer.
     NewConnection {
-        /// The [`InternalPeerID`] of this connection.
-        internal_peer_id: InternalPeerID<Z::Addr>,
+        /// Live metadata for the successfully handshaken connection.
+        peer: PeerInformation<Z::Addr>,
         /// The public address of the peer, if this peer has a reachable public address.
         public_address: Option<Z::Addr>,
-        /// The [`ConnectionHandle`] to this peer.
-        handle: ConnectionHandle,
-        /// An ID the peer assigned itself.
-        id: u64,
-        /// The peers [`PruningSeed`].
-        pruning_seed: PruningSeed,
-        /// The peers rpc port.
-        rpc_port: u16,
-        /// The peers rpc credits per hash
-        rpc_credits_per_hash: u32,
     },
 
     /// Tells the address book about a peer list received from a peer.
@@ -122,7 +111,7 @@ pub enum AddressBookRequest<Z: NetworkZone> {
     OwnAddress,
 
     /// Get info on all peers, white & grey.
-    Peerlist,
+    Peerlist { include_blocked: bool },
 
     /// Get the amount of white & grey peers.
     PeerlistSize,

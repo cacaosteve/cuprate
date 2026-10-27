@@ -28,7 +28,8 @@ pub struct BanState<A: NetZoneAddress> {
 /// Data within [`crate::services::AddressBookResponse::ConnectionInfo`].
 pub struct ConnectionInfo<A: NetZoneAddress> {
     // The following fields are mostly the same as `monerod`.
-    pub address: A,
+    /// Unknown inbound anonymous destinations must not be replaced by a proxy IP.
+    pub address: Option<A>,
     pub address_type: AddressType,
     pub avg_download: u64,
     pub avg_upload: u64,

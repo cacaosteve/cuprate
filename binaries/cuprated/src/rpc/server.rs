@@ -28,7 +28,7 @@ use tower_http::{limit::RequestBodyLimitLayer, timeout::RequestBodyDeadlineLayer
 use tracing::{debug, error, info, warn};
 
 use cuprate_helper::net::ip_is_local;
-use cuprate_rpc_interface::RouterBuilder;
+use cuprate_rpc_interface::{RouterBuilder, RpcHandler};
 
 use crate::{
     config::{restricted_rpc_port, unrestricted_rpc_port, RpcConfig},
@@ -161,8 +161,8 @@ pub(crate) async fn init_rpc_servers(
 }
 
 /// Initialize the Axum router of the RPC server.
-fn init_rpc_router(
-    rpc_handler: CupratedRpcHandler,
+fn init_rpc_router<H: RpcHandler>(
+    rpc_handler: H,
     request_byte_limit: usize,
     body_read_timeout: Duration,
 ) -> Router {
@@ -179,6 +179,7 @@ fn init_rpc_router(
         .other_send_raw_transaction()
         .other_sendrawtransaction()
         .other_get_transaction_pool_hashes()
+        .other_get_peer_list()
         .other_stop_daemon()
         //
         .bin_get_blocks()
@@ -542,3 +543,6 @@ impl RpcLimitCache {
         }
     }
 }
+
+#[cfg(test)]
+mod peer_rpc_tests;

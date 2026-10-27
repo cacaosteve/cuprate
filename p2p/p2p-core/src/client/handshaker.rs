@@ -473,25 +473,11 @@ where
 
     let (connection_guard, handle) = HandleBuilder::new().with_permit(permit).build();
 
-    // Tell the address book about the new connection.
-    address_book
-        .ready()
-        .await?
-        .call(AddressBookRequest::NewConnection {
-            internal_peer_id: addr,
-            public_address,
-            handle: handle.clone(),
-            id: peer_node_data.peer_id,
-            pruning_seed,
-            rpc_port: peer_node_data.rpc_port,
-            rpc_credits_per_hash: peer_node_data.rpc_credits_per_hash,
-        })
-        .await?;
-
     // Set up the connection data.
     let (connection_tx, client_rx) = mpsc::channel(CLIENT_QUEUE_SIZE);
 
     let info = PeerInformation {
+        connected_at: std::time::Instant::now(),
         id: addr,
         handle,
         direction,
@@ -499,6 +485,15 @@ where
         basic_node_data: peer_node_data,
         core_sync_data: Arc::new(Mutex::new(peer_core_sync)),
     };
+
+    address_book
+        .ready()
+        .await?
+        .call(AddressBookRequest::NewConnection {
+            peer: info.clone(),
+            public_address,
+        })
+        .await?;
 
     let protocol_request_handler = protocol_request_svc_maker
         .ready()

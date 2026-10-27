@@ -87,6 +87,9 @@ pub(crate) struct LaunchContext {
     /// Read handle to the transaction pool.
     pub txpool_read: TxpoolReadHandle,
 
+    /// Query handles for network zones, including zones enabled after sync.
+    pub peers: rpc::PeerServices,
+
     /// Task spawning and shutdown coordination.
     pub task_executor: TaskExecutor,
 }
@@ -212,6 +215,7 @@ impl Node {
                 reorg_lock: Arc::new(RwLock::new(())),
                 blockchain: blockchain_interface,
                 txpool_read: txpool_read_handle,
+                peers: rpc::PeerServices::default(),
                 task_executor,
             };
 
@@ -222,6 +226,7 @@ impl Node {
             // Start clearnet P2P zone
             let (clearnet_interface, clearnet_tx_handler_subscriber) =
                 p2p::initialize_clearnet_p2p(&launch_ctx, &tor_context).await?;
+            launch_ctx.peers.set_clearnet(&clearnet_interface);
 
             // Create Tor router delivery channel.
             let (tor_router_tx, tor_router_rx) = tor_enabled.then(oneshot::channel).unzip();

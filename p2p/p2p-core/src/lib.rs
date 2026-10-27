@@ -147,6 +147,8 @@ pub trait NetZoneAddress:
 pub trait NetworkZone: Clone + Copy + Send + 'static {
     /// The network name.
     const NAME: &'static str;
+    /// Address type to report when an inbound anonymous peer has no known address.
+    const ANONYMOUS_ADDRESS_TYPE: cuprate_types::AddressType = cuprate_types::AddressType::Invalid;
     /// Check if our node ID matches the incoming peers node ID for this network.
     ///
     /// This has privacy implications on an anonymity network if true so should be set

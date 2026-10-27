@@ -66,7 +66,7 @@ pub(crate) async fn map_request(
             Resp::SendRawTransaction(send_raw_transaction(state, r).await?)
         }
         Req::SaveBc(_) => Resp::SaveBc(not_available()?),
-        Req::GetPeerList(_) => Resp::GetPeerList(not_available()?),
+        Req::GetPeerList(r) => Resp::GetPeerList(get_peer_list(state, r).await?),
         Req::SetLogLevel(_) => Resp::SetLogLevel(not_available()?),
         Req::SetLogCategories(_) => Resp::SetLogCategories(not_available()?),
         Req::GetTransactionPool(_) => Resp::GetTransactionPool(not_available()?),
@@ -538,12 +538,17 @@ fn save_bc(_: CupratedRpcHandler, _: SaveBcRequest) -> SaveBcResponse {
 }
 
 /// <https://github.com/monero-project/monero/blob/cc73fe71162d564ffda8e549b79a350bca53c454/src/rpc/core_rpc_server.cpp#L1537-L1582>
-#[expect(dead_code)]
 async fn get_peer_list(
-    _state: CupratedRpcHandler,
-    _request: GetPeerListRequest,
+    state: CupratedRpcHandler,
+    request: GetPeerListRequest,
 ) -> Result<GetPeerListResponse, Error> {
-    let (white_list, gray_list) = address_book::peerlist::<ClearNet>(&mut DummyAddressBook).await?;
+    if state.is_restricted() {
+        return Err(anyhow!("get_peer_list requires administrative RPC"));
+    }
+    let (white_list, gray_list) = state
+        .peers
+        .peerlist(request.public_only, request.include_blocked)
+        .await?;
 
     Ok(GetPeerListResponse {
         base: helper::response_base(false),
@@ -707,7 +712,7 @@ async fn get_public_nodes(
     _state: CupratedRpcHandler,
     _request: GetPublicNodesRequest,
 ) -> Result<GetPublicNodesResponse, Error> {
-    let (white, gray) = address_book::peerlist::<ClearNet>(&mut DummyAddressBook).await?;
+    let (white, gray) = address_book::peerlist::<ClearNet>(&mut DummyAddressBook, false).await?;
 
     fn map(peers: Vec<cuprate_types::rpc::Peer>) -> Vec<PublicNode> {
         peers

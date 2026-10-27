@@ -20,12 +20,11 @@ use tokio_util::time::DelayQueue;
 use tower::Service;
 
 use cuprate_p2p_core::{
-    client::InternalPeerID,
-    handles::ConnectionHandle,
+    client::{InternalPeerID, PeerInformation},
     services::{AddressBookRequest, AddressBookResponse, ZoneSpecificPeerListEntryBase},
-    NetZoneAddress, NetworkZone,
+    types::Peerlist,
+    ConnectionDirection, NetZoneAddress, NetworkZone,
 };
-use cuprate_pruning::PruningSeed;
 
 use crate::{
     peer_list::PeerList, store::save_peers_to_disk, AddressBookConfig, AddressBookError,
@@ -38,14 +37,7 @@ mod tests;
 /// An entry in the connected list.
 pub(crate) struct ConnectionPeerEntry<Z: NetworkZone> {
     addr: Option<Z::Addr>,
-    id: u64,
-    handle: ConnectionHandle,
-    /// The peers pruning seed
-    pruning_seed: PruningSeed,
-    /// The peers port.
-    rpc_port: u16,
-    /// The peers rpc credits per hash
-    rpc_credits_per_hash: u32,
+    info: PeerInformation<Z::Addr>,
 }
 
 pub struct AddressBook<Z: BorshNetworkZone> {
@@ -151,15 +143,15 @@ impl<Z: BorshNetworkZone> AddressBook<Z> {
 
         #[expect(clippy::iter_over_hash_type, reason = "ordering doesn't matter here")]
         for (internal_addr, peer) in &mut self.connected_peers {
-            if let Some(time) = peer.handle.check_should_ban() {
+            if let Some(time) = peer.info.handle.check_should_ban() {
                 match internal_addr {
                     InternalPeerID::KnownAddr(addr) => addrs_to_ban.push((*addr, time.0)),
                     // If we don't know the peers address all we can do is disconnect.
-                    InternalPeerID::Unknown(_) => peer.handle.send_close_signal(),
+                    InternalPeerID::Unknown(_) => peer.info.handle.send_close_signal(),
                 }
             }
 
-            if peer.handle.is_closed() {
+            if peer.info.handle.is_closed() {
                 internal_addr_disconnected.push(*internal_addr);
             }
         }
@@ -201,7 +193,7 @@ impl<Z: BorshNetworkZone> AddressBook<Z> {
                     .expect("Peer must be in connected list if in connected_peers_with_ban_id")
             }) {
                 // The peer will get removed from our connected list once we disconnect
-                peer.handle.send_close_signal();
+                peer.info.handle.send_close_signal();
                 // Remove the peer now from anchors so we don't accidentally persist a bad anchor peer to disk.
                 self.anchor_list.remove(&addr);
             }
@@ -304,22 +296,22 @@ impl<Z: BorshNetworkZone> AddressBook<Z> {
         };
 
         if let Some(peb) = self.white_list.get_peer_mut(addr) {
-            if peb.pruning_seed != peer.pruning_seed {
+            if peb.pruning_seed != peer.info.pruning_seed {
                 return Err(AddressBookError::PeersDataChanged("Pruning seed"));
             }
             // TODO: cuprate doesn't need last seen timestamps but should we have them anyway?
             peb.last_seen = 0;
-            peb.rpc_port = peer.rpc_port;
-            peb.rpc_credits_per_hash = peer.rpc_credits_per_hash;
+            peb.rpc_port = peer.info.basic_node_data.rpc_port;
+            peb.rpc_credits_per_hash = peer.info.basic_node_data.rpc_credits_per_hash;
         } else {
             // if the peer is reachable add it to our white list
             let peb = ZoneSpecificPeerListEntryBase {
-                id: peer.id,
+                id: peer.info.basic_node_data.peer_id,
                 adr: *addr,
                 last_seen: 0,
-                rpc_port: peer.rpc_port,
-                rpc_credits_per_hash: peer.rpc_credits_per_hash,
-                pruning_seed: peer.pruning_seed,
+                rpc_port: peer.info.basic_node_data.rpc_port,
+                rpc_credits_per_hash: peer.info.basic_node_data.rpc_credits_per_hash,
+                pruning_seed: peer.info.pruning_seed,
             };
             self.white_list.add_new_peer(peb);
         }
@@ -386,25 +378,28 @@ impl<Z: BorshNetworkZone> Service<AddressBookRequest<Z>> for AddressBook<Z> {
         let span = tracing::info_span!("AddressBook");
         let _guard = span.enter();
 
+        // Close/ban signals can arrive between poll_ready and call. Queries
+        // must not include disconnected peers even in that interval.
+        if matches!(
+            &req,
+            AddressBookRequest::ConnectionCount
+                | AddressBookRequest::ConnectionInfo
+                | AddressBookRequest::Peerlist { .. }
+                | AddressBookRequest::PeerlistSize
+        ) {
+            self.poll_connected_peers();
+        }
+
         let response = match req {
             AddressBookRequest::NewConnection {
-                internal_peer_id,
+                peer,
                 public_address,
-                handle,
-                id,
-                pruning_seed,
-                rpc_port,
-                rpc_credits_per_hash,
             } => self
                 .handle_new_connection(
-                    internal_peer_id,
+                    peer.id,
                     ConnectionPeerEntry {
                         addr: public_address,
-                        id,
-                        handle,
-                        pruning_seed,
-                        rpc_port,
-                        rpc_credits_per_hash,
+                        info: peer,
                     },
                 )
                 .map(|()| AddressBookResponse::Ok),
@@ -434,12 +429,53 @@ impl<Z: BorshNetworkZone> Service<AddressBookRequest<Z>> for AddressBook<Z> {
             AddressBookRequest::OwnAddress => {
                 Ok(AddressBookResponse::OwnAddress(self.cfg.our_own_address))
             }
-            AddressBookRequest::Peerlist
-            | AddressBookRequest::PeerlistSize
-            | AddressBookRequest::ConnectionCount
-            | AddressBookRequest::SetBan(_)
-            | AddressBookRequest::GetBans
-            | AddressBookRequest::ConnectionInfo => {
+            AddressBookRequest::Peerlist { include_blocked } => {
+                let visible = |peer: &&ZoneSpecificPeerListEntryBase<Z::Addr>| {
+                    include_blocked || !self.is_peer_banned(&peer.adr)
+                };
+                Ok(AddressBookResponse::Peerlist(Peerlist {
+                    white: self
+                        .white_list
+                        .peers
+                        .values()
+                        .filter(visible)
+                        .copied()
+                        .collect(),
+                    grey: self
+                        .gray_list
+                        .peers
+                        .values()
+                        .filter(visible)
+                        .copied()
+                        .collect(),
+                }))
+            }
+            AddressBookRequest::PeerlistSize => Ok(AddressBookResponse::PeerlistSize {
+                white: self.white_list.len(),
+                grey: self.gray_list.len(),
+            }),
+            AddressBookRequest::ConnectionCount => {
+                let mut incoming = 0;
+                let mut outgoing = 0;
+                #[expect(
+                    clippy::iter_over_hash_type,
+                    reason = "only counting connection directions"
+                )]
+                for peer in self.connected_peers.values() {
+                    match peer.info.direction {
+                        ConnectionDirection::Inbound => incoming += 1,
+                        ConnectionDirection::Outbound => outgoing += 1,
+                    }
+                }
+                Ok(AddressBookResponse::ConnectionCount { incoming, outgoing })
+            }
+            AddressBookRequest::ConnectionInfo => Ok(AddressBookResponse::ConnectionInfo(
+                self.connected_peers
+                    .values()
+                    .map(|peer| peer.info.connection_info::<Z>())
+                    .collect(),
+            )),
+            AddressBookRequest::SetBan(_) | AddressBookRequest::GetBans => {
                 todo!("finish https://github.com/Cuprate/cuprate/pull/297")
             }
         };

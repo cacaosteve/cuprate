@@ -91,7 +91,7 @@ pub(crate) async fn map_request(
             Resp::GetBlockHeadersRange(get_block_headers_range(state, r).await?)
         }
         Req::GetBlock(r) => Resp::GetBlock(get_block(state, r).await?),
-        Req::GetConnections(_) => Resp::GetConnections(not_available()?),
+        Req::GetConnections(r) => Resp::GetConnections(get_connections(state, r).await?),
         Req::GetInfo(r) => Resp::GetInfo(get_info(state, r).await?),
         Req::HardForkInfo(r) => Resp::HardForkInfo(hard_fork_info(state, r).await?),
         Req::SetBans(_) => Resp::SetBans(not_available()?),
@@ -446,12 +446,14 @@ async fn get_block(
 }
 
 /// <https://github.com/monero-project/monero/blob/cc73fe71162d564ffda8e549b79a350bca53c454/src/rpc/core_rpc_server.cpp#L2729-L2738>
-#[expect(dead_code)]
 async fn get_connections(
-    _state: CupratedRpcHandler,
+    state: CupratedRpcHandler,
     _: GetConnectionsRequest,
 ) -> Result<GetConnectionsResponse, Error> {
-    let connections = address_book::connection_info::<ClearNet>(&mut DummyAddressBook).await?;
+    if state.is_restricted() {
+        return Err(anyhow!("get_connections requires administrative RPC"));
+    }
+    let connections = state.peers.connections().await?;
 
     Ok(GetConnectionsResponse {
         base: helper::response_base(false),
@@ -509,16 +511,9 @@ pub(super) async fn get_info(
     let height = usize_to_u64(c.chain_height);
     let height_without_bootstrap = if restricted { 0 } else { height };
 
-    #[expect(
-        clippy::branches_sharing_code,
-        reason = "TODO: wire up address_book connection count"
-    )]
-    let (incoming_connections_count, outgoing_connections_count) = if restricted {
-        (0, 0)
-    } else {
-        // TODO: address_book::connection_count::<ClearNet>(&mut DummyAddressBook).await?
-        (0, 0)
-    };
+    let peer_counts = state.peers.counts(restricted).await?;
+    let incoming_connections_count = peer_counts.incoming;
+    let outgoing_connections_count = peer_counts.outgoing;
 
     let network = state.network;
 
@@ -568,16 +563,8 @@ pub(super) async fn get_info(
         VERSION_BUILD.to_string()
     };
 
-    #[expect(
-        clippy::branches_sharing_code,
-        reason = "TODO: wire up address_book peerlist size"
-    )]
-    let (white_peerlist_size, grey_peerlist_size) = if restricted {
-        (0, 0)
-    } else {
-        // TODO: address_book::peerlist_size::<ClearNet>(&mut DummyAddressBook).await?
-        (0, 0)
-    };
+    let white_peerlist_size = peer_counts.white;
+    let grey_peerlist_size = peer_counts.grey;
 
     let wide_cumulative_difficulty = cumulative_difficulty.hex_prefix();
     let wide_difficulty = c.next_difficulty.hex_prefix();

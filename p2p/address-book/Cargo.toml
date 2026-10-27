@@ -27,6 +27,7 @@ borsh = { workspace = true, features = ["derive", "std"] }
 
 [dev-dependencies]
 cuprate-test-utils = { workspace = true }
+cuprate-wire = { workspace = true }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"]}
 

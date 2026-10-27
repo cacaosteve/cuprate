@@ -45,6 +45,7 @@ pub struct Tor;
 
 impl NetworkZone for Tor {
     const NAME: &'static str = "Tor";
+    const ANONYMOUS_ADDRESS_TYPE: cuprate_types::AddressType = cuprate_types::AddressType::Tor;
 
     const CHECK_NODE_ID: bool = false;
 

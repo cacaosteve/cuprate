@@ -970,6 +970,7 @@ dependencies = [
  "cuprate-p2p-core",
  "cuprate-pruning",
  "cuprate-test-utils",
+ "cuprate-wire",
  "futures",
  "indexmap 2.14.1",
  "rand 0.8.8",
