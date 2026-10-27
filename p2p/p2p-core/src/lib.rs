@@ -83,8 +83,11 @@ pub mod handles;
 mod network_zones;
 pub mod protocol;
 pub mod services;
+mod transaction_counters;
 pub mod transports;
 pub mod types;
+
+pub use transaction_counters::{TransactionCounterSnapshot, TransactionCounters};
 
 pub use error::*;
 pub use network_zones::{ClearNet, I2p, Tor};

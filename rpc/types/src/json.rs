@@ -327,6 +327,39 @@ define_request_and_response! {
     }
 }
 
+crate::macros::define_request! {
+    /// Cuprate extension: process-lifetime transaction totals, administrative RPC only.
+    GetTransactionCountersRequest (restricted, empty) {}
+}
+
+/// Transaction traffic for a network zone; not a unique-transaction census.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+pub struct NetworkTransactionCounters {
+    /// Blobs in decoded P2P transaction notifications, including duplicates/invalid txs.
+    pub received: u64,
+    /// Successful new txpool insertions attributed to this source zone.
+    pub accepted: u64,
+    /// Blobs successfully written to peer sockets, including fan-out and re-relays.
+    /// Does not imply acknowledgement or acceptance by a remote peer.
+    pub relayed: u64,
+}
+
+/// Cuprate extension: private aggregate transaction diagnostics. Resets on restart.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+pub struct GetTransactionCountersResponse {
+    /// Standard response status.
+    #[cfg_attr(feature = "serde", serde(flatten))]
+    pub base: ResponseBase,
+    /// Clearnet P2P totals.
+    pub clearnet: NetworkTransactionCounters,
+    /// Tor P2P totals; zero if the zone has not started.
+    pub tor: NetworkTransactionCounters,
+    /// I2P P2P totals; zero if the zone has not started.
+    pub i2p: NetworkTransactionCounters,
+}
+
 define_request_and_response! {
     get_info,
     "cc73fe71162d564ffda8e549b79a350bca53c454" =>
@@ -769,6 +802,7 @@ pub enum JsonRpcRequest {
     #[cfg_attr(feature = "serde", serde(alias = "getblock"))]
     GetBlock(GetBlockRequest),
     GetConnections(GetConnectionsRequest),
+    GetTransactionCounters(GetTransactionCountersRequest),
     GetInfo(GetInfoRequest),
     HardForkInfo(HardForkInfoRequest),
     SetBans(SetBansRequest),
@@ -847,6 +881,9 @@ impl<'de> Deserialize<'de> for JsonRpcRequest {
             }
             "get_block" | "getblock" => Self::GetBlock(de!(GetBlockRequest)),
             "get_connections" => Self::GetConnections(de!(GetConnectionsRequest)),
+            "get_transaction_counters" => {
+                Self::GetTransactionCounters(de!(GetTransactionCountersRequest))
+            }
             "get_info" => Self::GetInfo(de!(GetInfoRequest)),
             "hard_fork_info" => Self::HardForkInfo(de!(HardForkInfoRequest)),
             "set_bans" => Self::SetBans(de!(SetBansRequest)),
@@ -895,6 +932,7 @@ impl RpcCallValue for JsonRpcRequest {
             Self::GetTxIdsLoose(x) => x.is_restricted(),
             Self::GenerateBlocks(x) => x.is_restricted(),
             Self::GetConnections(x) => x.is_restricted(),
+            Self::GetTransactionCounters(x) => x.is_restricted(),
             Self::SetBans(x) => x.is_restricted(),
             Self::GetBans(x) => x.is_restricted(),
             Self::Banned(x) => x.is_restricted(),
@@ -932,6 +970,7 @@ impl RpcCallValue for JsonRpcRequest {
             Self::GetTxIdsLoose(x) => x.is_empty(),
             Self::GenerateBlocks(x) => x.is_empty(),
             Self::GetConnections(x) => x.is_empty(),
+            Self::GetTransactionCounters(x) => x.is_empty(),
             Self::SetBans(x) => x.is_empty(),
             Self::GetBans(x) => x.is_empty(),
             Self::Banned(x) => x.is_empty(),
@@ -987,6 +1026,7 @@ pub enum JsonRpcResponse {
     GetBlockHeadersRange(GetBlockHeadersRangeResponse),
     GetBlock(GetBlockResponse),
     GetConnections(GetConnectionsResponse),
+    GetTransactionCounters(GetTransactionCountersResponse),
     GetInfo(GetInfoResponse),
     HardForkInfo(HardForkInfoResponse),
     SetBans(SetBansResponse),
@@ -1024,6 +1064,44 @@ mod test {
     use cuprate_types::HardFork;
 
     use super::*;
+
+    #[test]
+    fn transaction_counters_are_a_private_empty_request() {
+        for params in [
+            None,
+            Some(serde_json::json!({})),
+            Some(Value::Null),
+            Some(serde_json::json!([])),
+        ] {
+            let mut json = serde_json::json!({"method":"get_transaction_counters"});
+            if let Some(params) = params {
+                json["params"] = params;
+            }
+            let request: JsonRpcRequest = from_value(json).unwrap();
+            assert!(matches!(request, JsonRpcRequest::GetTransactionCounters(_)));
+            assert!(request.is_restricted());
+            assert!(request.is_empty());
+        }
+        let counters = GetTransactionCountersResponse {
+            base: ResponseBase::OK,
+            i2p: NetworkTransactionCounters {
+                received: 10,
+                accepted: 3,
+                relayed: 7,
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&counters).unwrap();
+        assert_eq!(
+            json["i2p"],
+            serde_json::json!({"received":10,"accepted":3,"relayed":7})
+        );
+        assert_eq!(json["status"], "OK");
+        assert_eq!(
+            from_value::<GetTransactionCountersResponse>(json).unwrap(),
+            counters
+        );
+    }
 
     #[expect(clippy::needless_pass_by_value)]
     fn test_json_request<T: DeserializeOwned + PartialEq + Debug>(

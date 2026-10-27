@@ -478,6 +478,7 @@ async fn send_raw_transaction(
     let txs = vec![tx.serialize().into()];
 
     let txs = IncomingTxs {
+        origin: None,
         txs,
         state: TxState::Local,
         drop_relay_rule_errors: false,

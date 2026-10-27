@@ -106,6 +106,7 @@ pub struct HandShaker<Z: NetworkZone, T: Transport<Z>, AdrBook, CSync, ProtoHdlr
 
     /// Called with a peer's [`CoreSyncData`].
     on_peer_sync: Option<PeerSyncCallback>,
+    transaction_counters: crate::TransactionCounters,
 
     /// Client configuration used by the handshaker for this transport
     transport_client_config: T::ClientConfig,
@@ -127,6 +128,7 @@ impl<Z: NetworkZone, T: Transport<Z>, AdrBook, CSync, ProtoHdlrMkr, BrdcstStrmMk
         our_basic_node_data: BasicNodeData,
         connection_parent_span: Span,
         on_peer_sync: Option<PeerSyncCallback>,
+        transaction_counters: crate::TransactionCounters,
         transport_client_config: T::ClientConfig,
     ) -> Self {
         Self {
@@ -137,6 +139,7 @@ impl<Z: NetworkZone, T: Transport<Z>, AdrBook, CSync, ProtoHdlrMkr, BrdcstStrmMk
             our_basic_node_data,
             connection_parent_span,
             on_peer_sync,
+            transaction_counters,
             transport_client_config,
             _zone: PhantomData,
         }
@@ -178,6 +181,7 @@ where
 
         let connection_parent_span = self.connection_parent_span.clone();
         let on_peer_sync = self.on_peer_sync.clone();
+        let transaction_counters = self.transaction_counters.clone();
 
         let transport_client_config = self.transport_client_config.clone();
 
@@ -196,6 +200,7 @@ where
                     our_basic_node_data,
                     connection_parent_span,
                     on_peer_sync,
+                    transaction_counters,
                 ),
             )
             .await?
@@ -272,6 +277,7 @@ async fn handshake<
     our_basic_node_data: BasicNodeData,
     connection_parent_span: Span,
     on_peer_sync: Option<PeerSyncCallback>,
+    transaction_counters: crate::TransactionCounters,
 ) -> Result<Client<Z>, HandshakeError>
 where
     AdrBook: AddressBook<Z> + Clone,
@@ -477,6 +483,7 @@ where
     let (connection_tx, client_rx) = mpsc::channel(CLIENT_QUEUE_SIZE);
 
     let info = PeerInformation {
+        transaction_counters,
         connected_at: std::time::Instant::now(),
         id: addr,
         handle,

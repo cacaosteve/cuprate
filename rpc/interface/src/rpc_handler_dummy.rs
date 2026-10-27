@@ -68,6 +68,7 @@ impl Service<JsonRpcRequest> for RpcHandlerDummy {
             Req::GetBlockHeadersRange(_) => Resp::GetBlockHeadersRange(Default::default()),
             Req::GetBlock(_) => Resp::GetBlock(Default::default()),
             Req::GetConnections(_) => Resp::GetConnections(Default::default()),
+            Req::GetTransactionCounters(_) => Resp::GetTransactionCounters(Default::default()),
             Req::GetInfo(_) => Resp::GetInfo(Default::default()),
             Req::HardForkInfo(_) => Resp::HardForkInfo(Default::default()),
             Req::SetBans(_) => Resp::SetBans(Default::default()),

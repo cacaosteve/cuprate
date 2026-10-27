@@ -92,6 +92,14 @@ pub(crate) async fn map_request(
         }
         Req::GetBlock(r) => Resp::GetBlock(get_block(state, r).await?),
         Req::GetConnections(r) => Resp::GetConnections(get_connections(state, r).await?),
+        Req::GetTransactionCounters(_) => {
+            if state.is_restricted() {
+                return Err(anyhow!(
+                    "get_transaction_counters requires administrative RPC"
+                ));
+            }
+            Resp::GetTransactionCounters(state.peers.transaction_counters())
+        }
         Req::GetInfo(r) => Resp::GetInfo(get_info(state, r).await?),
         Req::HardForkInfo(r) => Resp::HardForkInfo(hard_fork_info(state, r).await?),
         Req::SetBans(_) => Resp::SetBans(not_available()?),

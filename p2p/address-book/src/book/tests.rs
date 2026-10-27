@@ -28,6 +28,7 @@ fn peer_info<A: NetZoneAddress>(
     pruning_seed: PruningSeed,
 ) -> PeerInformation<A> {
     PeerInformation {
+        transaction_counters: Default::default(),
         connected_at: Instant::now().checked_sub(Duration::from_secs(20)).unwrap(),
         id,
         handle,

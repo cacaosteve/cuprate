@@ -52,6 +52,7 @@ This section contains the development status of endpoints/methods in `cuprated`.
 | `get_miner_data`               | 🟣     |
 | `get_output_distribution`      | 🟠     |
 | `get_output_histogram`         | 🟠     |
+| `get_transaction_counters`     | 🟢     | Cuprate extension; admin-only per-network totals |
 | `get_tx_ids_loose`             | ⚫     |
 | `get_txpool_backlog`           | 🟠     |
 | `get_version`                  | 🟠     |
@@ -155,3 +156,51 @@ does not bypass administrative authorization. `include_blocked` defaults to
 so this is not a history of banned peers. Last-seen timestamps are not tracked
 and remain zero. No transaction IDs or transaction/peer timing correlations are
 added by these diagnostics.
+
+## Private transaction counters (Cuprate extension)
+
+`get_transaction_counters` is available **only on unrestricted administrative
+RPC**. Restricted RPC rejects it with JSON-RPC error `-32601`; the totals are
+not added to public `get_info` or per-peer connection information.
+
+```sh
+curl -fsS http://127.0.0.1:18081/json_rpc \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"get_transaction_counters"}'
+```
+
+The result contains `status`, `untrusted`, and `clearnet`, `tor`, `i2p` objects,
+each with three integer totals:
+
+- `received`: transaction **blobs**, not message envelopes, in successfully
+  decoded P2P `NewTransactions` notifications. Includes duplicates, invalid
+  transactions, and notifications ignored while behind the peer. Does not count
+  block-sync transaction data, malformed wire envelopes, or local wallet RPC.
+- `accepted`: new txpool insertions successfully committed from that source
+  zone. Verification or queueing alone does not count; known transactions,
+  concurrent duplicates, double spends, and restored pool entries do not count.
+  This is not a lifetime unique-hash census: a removed transaction subsequently
+  reaccepted counts as a new insertion. The first successful insertion determines
+  attribution; an I2P echo of an already accepted clearnet transaction is only a
+  receipt, not a second acceptance.
+- `relayed`: transaction blobs whose transport send **and flush** succeeded to
+  peers in that destination zone, for both stem and fluff. Queued messages,
+  failed/timed-out sends and canceled sends do not count. Successful retries and
+  fan-out count once per blob per successful peer send. Monero notifications have
+  no acknowledgement: this does not prove remote receipt, validation, mining, or
+  propagation beyond that peer.
+
+For example, receiving a tx over I2P and passing it to clearnet increases I2P
+`received`/`accepted` and clearnet `relayed`, not I2P `relayed`. Local wallet RPC
+submissions do not increment any zone's `received`/`accepted`, but their actual
+outbound P2P sends increment the destination zone's `relayed` total. Consequently
+the totals need not match, and `received - accepted` is **not** a rejection count.
+
+Counters are fixed-size, memory-only, cumulative within each initialized network
+zone for the running process. They survive peer disconnects and RPC connections,
+reset on node restart, and saturate at `u64::MAX`. Disabled/not-yet-started zones
+report zero; late-starting I2P/Tor becomes visible automatically. Each zone's
+snapshot is consistent, but snapshots across zones are not a single global
+instant. No hashes, identities or per-transaction timestamps are retained. These
+diagnostics do not change relay policy; in particular, accepting I2P traffic does
+not cause local wallet transactions to switch from clearnet to I2P sending.

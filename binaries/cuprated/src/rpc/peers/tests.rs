@@ -40,6 +40,7 @@ fn peer<A: NetZoneAddress>(
     let (guard, handle) = HandleBuilder::new().build();
     (
         PeerInformation {
+            transaction_counters: Default::default(),
             connected_at: Instant::now().checked_sub(Duration::from_secs(12)).unwrap(),
             id,
             handle,

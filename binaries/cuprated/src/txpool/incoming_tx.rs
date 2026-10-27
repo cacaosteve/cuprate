@@ -47,6 +47,8 @@ use crate::{
 
 /// Incoming transactions.
 pub(crate) struct IncomingTxs {
+    /// P2P source zone, retained independently of stem/fluff state. Local RPC has no zone.
+    pub origin: Option<cuprate_p2p_core::TransactionCounters>,
     /// The raw bytes of the transactions.
     pub txs: Vec<Bytes>,
     /// The routing state of the transactions.
@@ -210,6 +212,7 @@ impl Service<IncomingTxs> for IncomingTxHandler {
 #[expect(clippy::too_many_arguments)]
 async fn handle_incoming_txs(
     IncomingTxs {
+        origin,
         txs,
         state,
         drop_relay_rule_errors,
@@ -265,7 +268,11 @@ async fn handle_incoming_txs(
 
         if txpool_manager_handle
             .command_tx
-            .send(TxpoolManagerCommand::IncomingTx(tx, state.clone()))
+            .send(TxpoolManagerCommand::IncomingTx(
+                tx,
+                state.clone(),
+                origin.clone(),
+            ))
             .await
             .is_err()
         {

@@ -163,6 +163,7 @@ pub(crate) enum TxpoolManagerCommand {
     IncomingTx(
         TransactionVerificationData,
         TxState<CrossNetworkInternalPeerId>,
+        Option<cuprate_p2p_core::TransactionCounters>,
     ),
 
     /// Request hashes of public-pool transactions added/removed at or after a UNIX timestamp.
@@ -486,6 +487,7 @@ impl TxpoolManager {
         &mut self,
         tx: TransactionVerificationData,
         state: TxState<CrossNetworkInternalPeerId>,
+        origin: Option<cuprate_p2p_core::TransactionCounters>,
     ) -> Result<(), FatalError> {
         tracing::debug!("handling new tx");
 
@@ -528,6 +530,9 @@ impl TxpoolManager {
         }
 
         self.track_tx(tx_hash, tx_weight, tx_fee, state.is_stem_stage(), relay);
+        if let Some(origin) = origin {
+            origin.record_accepted();
+        }
 
         let incoming_tx = incoming_tx
             .with_routing_state(state)
@@ -649,8 +654,8 @@ impl TxpoolManager {
                 }
                 Some(command) = command_rx.recv() => {
                     match command {
-                        TxpoolManagerCommand::IncomingTx(tx, state) => {
-                            self.handle_incoming_tx(tx, state).await?;
+                        TxpoolManagerCommand::IncomingTx(tx, state, origin) => {
+                            self.handle_incoming_tx(tx, state, origin).await?;
                         }
                         TxpoolManagerCommand::PoolInfoSince { since, response_tx } => {
                             // If `since` is 0 the requester wants the full pool. If `since` is older than `removed_txs_start_time`,

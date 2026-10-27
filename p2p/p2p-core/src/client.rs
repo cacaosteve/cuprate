@@ -54,6 +54,8 @@ impl<A: Display> Display for InternalPeerID<A> {
 /// Information on a connected peer.
 #[derive(Debug, Clone)]
 pub struct PeerInformation<A> {
+    /// Aggregate transaction diagnostics for this peer's network zone (not per-peer).
+    pub transaction_counters: crate::TransactionCounters,
     /// When this connection completed its handshake (monotonic clock).
     pub connected_at: Instant,
     /// The internal peer ID of this peer.

@@ -9,7 +9,7 @@ use cuprate_helper::cast::usize_to_u64;
 use cuprate_p2p::NetworkInterface;
 use cuprate_p2p_core::{
     services::{AddressBookRequest, AddressBookResponse},
-    ClearNet, I2p, NetworkZone, Tor,
+    ClearNet, I2p, NetworkZone, Tor, TransactionCounters,
 };
 use cuprate_rpc_types::misc::ConnectionInfo;
 use cuprate_types::rpc::Peer;
@@ -23,6 +23,9 @@ struct Books {
     clearnet: Option<Book<ClearNet>>,
     tor: Option<Book<Tor>>,
     i2p: Option<Book<I2p>>,
+    clearnet_transactions: TransactionCounters,
+    tor_transactions: TransactionCounters,
+    i2p_transactions: TransactionCounters,
 }
 
 /// Does not own the networking tasks; only clones query handles.
@@ -39,15 +42,42 @@ pub(super) struct PeerCounts {
 
 impl PeerServices {
     pub(crate) fn set_clearnet(&self, interface: &NetworkInterface<ClearNet>) {
-        self.0.lock().unwrap().clearnet = Some(interface.address_book());
+        let mut books = self.0.lock().unwrap();
+        books.clearnet = Some(interface.address_book());
+        books.clearnet_transactions = interface.transaction_counters();
     }
 
     pub(crate) fn set_tor(&self, interface: &NetworkInterface<Tor>) {
-        self.0.lock().unwrap().tor = Some(interface.address_book());
+        let mut books = self.0.lock().unwrap();
+        books.tor = Some(interface.address_book());
+        books.tor_transactions = interface.transaction_counters();
     }
 
     pub(crate) fn set_i2p(&self, interface: &NetworkInterface<I2p>) {
-        self.0.lock().unwrap().i2p = Some(interface.address_book());
+        let mut books = self.0.lock().unwrap();
+        books.i2p = Some(interface.address_book());
+        books.i2p_transactions = interface.transaction_counters();
+    }
+
+    pub(super) fn transaction_counters(
+        &self,
+    ) -> cuprate_rpc_types::json::GetTransactionCountersResponse {
+        use cuprate_rpc_types::{base::ResponseBase, json::NetworkTransactionCounters};
+        let books = self.0.lock().unwrap();
+        let snapshot = |counters: &TransactionCounters| {
+            let totals = counters.snapshot();
+            NetworkTransactionCounters {
+                received: totals.received,
+                accepted: totals.accepted,
+                relayed: totals.relayed,
+            }
+        };
+        cuprate_rpc_types::json::GetTransactionCountersResponse {
+            base: ResponseBase::OK,
+            clearnet: snapshot(&books.clearnet_transactions),
+            tor: snapshot(&books.tor_transactions),
+            i2p: snapshot(&books.i2p_transactions),
+        }
     }
 
     /// Never query or disclose private topology on restricted RPC.

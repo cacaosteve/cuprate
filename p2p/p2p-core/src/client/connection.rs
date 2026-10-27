@@ -26,6 +26,28 @@ use crate::{
     PeerResponse, ProtocolRequestHandler, ProtocolResponse, Transport,
 };
 
+#[cfg(test)]
+mod transaction_counter_tests;
+
+/// Count actual sends, not queue submissions. A notification has no peer acknowledgement.
+async fn send_message<S>(
+    sink: &mut S,
+    message: Message,
+    counters: &crate::TransactionCounters,
+) -> Result<(), PeerError>
+where
+    S: futures::Sink<cuprate_wire::levin::LevinMessage<Message>, Error = cuprate_wire::BucketError>
+        + Unpin,
+{
+    let count = crate::transaction_counters::transaction_count(&message);
+    timeout(SENDING_TIMEOUT, sink.send(message.into()))
+        .await
+        .map_err(|_| PeerError::TimedOut)?
+        .map_err(PeerError::BucketError)?;
+    counters.record_relayed(count);
+    Ok(())
+}
+
 /// A request to the connection task from a [`Client`](crate::client::Client).
 pub(crate) struct ConnectionTaskRequest {
     /// The request.
@@ -130,10 +152,12 @@ where
     async fn send_message_to_peer(&mut self, mes: Message) -> Result<(), PeerError> {
         tracing::debug!("Sending message: [{}] to peer", mes.command());
 
-        timeout(SENDING_TIMEOUT, self.peer_sink.send(mes.into()))
-            .await
-            .map_err(|_| PeerError::TimedOut)
-            .and_then(|res| res.map_err(PeerError::BucketError))
+        send_message(
+            &mut self.peer_sink,
+            mes,
+            &self.peer_request_handler.peer_info.transaction_counters,
+        )
+        .await
     }
 
     /// Handles a broadcast request from Cuprate.
@@ -291,7 +315,9 @@ where
             },
             peer_message = stream.next() => {
                 if let Some(peer_message) = peer_message {
-                    self.handle_peer_request(peer_message?.try_into().map_err(|_| PeerError::PeerSentInvalidMessage)?).await
+                    let message = peer_message?;
+                    self.peer_request_handler.peer_info.transaction_counters.record_received(&message);
+                    self.handle_peer_request(message.try_into().map_err(|_| PeerError::PeerSentInvalidMessage)?).await
                 }else {
                     Err(PeerError::ClientChannelClosed)
                 }
@@ -338,7 +364,9 @@ where
             },
             peer_message = stream.next() => {
                 if let Some(peer_message) = peer_message {
-                    self.handle_potential_response(peer_message?).await
+                    let message = peer_message?;
+                    self.peer_request_handler.peer_info.transaction_counters.record_received(&message);
+                    self.handle_potential_response(message).await
                 } else {
                     Err(PeerError::ClientChannelClosed)
                 }
@@ -361,7 +389,12 @@ where
             eager_protocol_messages.len()
         );
         for message in eager_protocol_messages {
-            let message = Message::Protocol(message).try_into();
+            let message = Message::Protocol(message);
+            self.peer_request_handler
+                .peer_info
+                .transaction_counters
+                .record_received(&message);
+            let message = message.try_into();
 
             let res = match message {
                 Ok(mes) => self.handle_peer_request(mes).await,

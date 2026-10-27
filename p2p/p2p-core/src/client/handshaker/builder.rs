@@ -48,6 +48,7 @@ pub struct HandshakerBuilder<
     connection_parent_span: Option<Span>,
     /// Called with a peer's [`CoreSyncData`].
     on_peer_sync: Option<PeerSyncCallback>,
+    transaction_counters: crate::TransactionCounters,
 
     /// Transport method client configuration to use.
     transport_client_config: T::ClientConfig,
@@ -72,6 +73,7 @@ impl<N: NetworkZone, T: Transport<N>> HandshakerBuilder<N, T> {
             broadcast_stream_maker: |_| stream::pending(),
             connection_parent_span: None,
             on_peer_sync: None,
+            transaction_counters: crate::TransactionCounters::default(),
             transport_client_config,
             _zone: PhantomData,
         }
@@ -103,6 +105,7 @@ impl<N: NetworkZone, T: Transport<N>, AdrBook, CSync, ProtoHdlr, BrdcstStrmMkr>
             broadcast_stream_maker,
             connection_parent_span,
             on_peer_sync,
+            transaction_counters,
             transport_client_config,
             ..
         } = self;
@@ -115,6 +118,7 @@ impl<N: NetworkZone, T: Transport<N>, AdrBook, CSync, ProtoHdlr, BrdcstStrmMkr>
             broadcast_stream_maker,
             connection_parent_span,
             on_peer_sync,
+            transaction_counters,
             transport_client_config,
             _zone: PhantomData,
         }
@@ -147,6 +151,7 @@ impl<N: NetworkZone, T: Transport<N>, AdrBook, CSync, ProtoHdlr, BrdcstStrmMkr>
             broadcast_stream_maker,
             connection_parent_span,
             on_peer_sync,
+            transaction_counters,
             transport_client_config,
             ..
         } = self;
@@ -159,6 +164,7 @@ impl<N: NetworkZone, T: Transport<N>, AdrBook, CSync, ProtoHdlr, BrdcstStrmMkr>
             broadcast_stream_maker,
             connection_parent_span,
             on_peer_sync,
+            transaction_counters,
             transport_client_config,
             _zone: PhantomData,
         }
@@ -186,6 +192,7 @@ impl<N: NetworkZone, T: Transport<N>, AdrBook, CSync, ProtoHdlr, BrdcstStrmMkr>
             broadcast_stream_maker,
             connection_parent_span,
             on_peer_sync,
+            transaction_counters,
             transport_client_config,
             ..
         } = self;
@@ -198,6 +205,7 @@ impl<N: NetworkZone, T: Transport<N>, AdrBook, CSync, ProtoHdlr, BrdcstStrmMkr>
             broadcast_stream_maker,
             connection_parent_span,
             on_peer_sync,
+            transaction_counters,
             transport_client_config,
             _zone: PhantomData,
         }
@@ -225,6 +233,7 @@ impl<N: NetworkZone, T: Transport<N>, AdrBook, CSync, ProtoHdlr, BrdcstStrmMkr>
             our_basic_node_data,
             connection_parent_span,
             on_peer_sync,
+            transaction_counters,
             transport_client_config,
             ..
         } = self;
@@ -237,8 +246,21 @@ impl<N: NetworkZone, T: Transport<N>, AdrBook, CSync, ProtoHdlr, BrdcstStrmMkr>
             broadcast_stream_maker: new_broadcast_stream_maker,
             connection_parent_span,
             on_peer_sync,
+            transaction_counters,
             transport_client_config,
             _zone: PhantomData,
+        }
+    }
+
+    /// Share a network zone's transaction totals across all handshaken connections.
+    #[must_use]
+    pub fn with_transaction_counters(
+        self,
+        transaction_counters: crate::TransactionCounters,
+    ) -> Self {
+        Self {
+            transaction_counters,
+            ..self
         }
     }
 
@@ -278,6 +300,7 @@ impl<N: NetworkZone, T: Transport<N>, AdrBook, CSync, ProtoHdlr, BrdcstStrmMkr>
             self.our_basic_node_data,
             self.connection_parent_span.unwrap_or(Span::none()),
             self.on_peer_sync,
+            self.transaction_counters,
             self.transport_client_config,
         )
     }

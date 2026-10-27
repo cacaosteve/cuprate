@@ -455,6 +455,7 @@ where
         .ready()
         .await?
         .call(IncomingTxs {
+            origin: Some(peer_information.transaction_counters.clone()),
             txs,
             state,
             drop_relay_rule_errors: true,

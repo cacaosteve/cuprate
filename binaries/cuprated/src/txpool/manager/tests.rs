@@ -8,6 +8,115 @@ use tokio::time::timeout;
 use super::*;
 use crate::txpool::dandelion::tx_store::TxStoreService;
 
+#[tokio::test]
+async fn acceptance_requires_new_pool_insertion_and_preserves_source_even_for_fluff() {
+    for local in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let database = fjall::Database::builder(directory.path()).open().unwrap();
+        let workers = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .unwrap(),
+        );
+        let (read, write) = init_with_pool(database, workers).unwrap();
+        let (promote_tx, promote_rx) = mpsc::unbounded_channel();
+        let router = tower::service_fn(
+            |_: cuprate_dandelion_tower::DandelionRouteReq<
+                DandelionTx,
+                CrossNetworkInternalPeerId,
+            >| {
+                std::future::ready(Ok::<_, cuprate_dandelion_tower::DandelionRouterError>(
+                    State::Stem,
+                ))
+            },
+        );
+        let (dandelion, task) = cuprate_dandelion_tower::pool::start_dandelion_pool_manager(
+            8,
+            router,
+            TxStoreService {
+                txpool_read_handle: read.clone(),
+                txpool_write_handle: write.clone(),
+                promote_tx,
+            },
+            cuprate_dandelion_tower::DandelionConfig {
+                time_between_hop: Duration::from_secs(175),
+                epoch_duration: Duration::from_mins(10),
+                fluff_probability: 0.12,
+                graph: cuprate_dandelion_tower::Graph::FourRegular,
+            },
+        );
+        let executor = TaskExecutor::new();
+        let manager = start_txpool_manager(
+            write,
+            read,
+            promote_rx,
+            DiffuseService {
+                clear_net_broadcast_service: BroadcastSvc::mock(),
+            },
+            dandelion.clone(),
+            TxpoolConfig::default(),
+            executor.clone(),
+            LocalTxRelayMode::Clearnet,
+        )
+        .await
+        .unwrap();
+        let source = cuprate_p2p_core::TransactionCounters::default();
+        let echo_source = cuprate_p2p_core::TransactionCounters::default();
+        // Fluff has no peer ID in TxState, so attribution must use the explicit origin handle.
+        let state = if local {
+            TxState::Local
+        } else {
+            TxState::Fluff
+        };
+        let origin = if local { None } else { Some(source.clone()) };
+        manager
+            .command_tx
+            .send(TxpoolManagerCommand::IncomingTx(
+                TX_V2_RCT3.clone().try_into().unwrap(),
+                state,
+                origin,
+            ))
+            .await
+            .unwrap();
+        for origin in [source.clone(), echo_source.clone()] {
+            // Concurrent verification/peer echoes can queue the same tx again. The DB must
+            // reject that insertion, and neither source may gain another accepted count.
+            manager
+                .command_tx
+                .send(TxpoolManagerCommand::IncomingTx(
+                    TX_V2_RCT3.clone().try_into().unwrap(),
+                    TxState::Fluff,
+                    Some(origin),
+                ))
+                .await
+                .unwrap();
+        }
+        // FIFO command barrier: count only after all DB writes have actually completed.
+        let (response_tx, response_rx) = oneshot::channel();
+        manager
+            .command_tx
+            .send(TxpoolManagerCommand::PoolInfoSince {
+                since: 0,
+                response_tx,
+            })
+            .await
+            .unwrap();
+        drop(response_rx.await.unwrap());
+        assert_eq!(source.snapshot().accepted, u64::from(!local));
+        assert_eq!(echo_source.snapshot().accepted, 0);
+        assert_eq!(
+            source.snapshot().relayed,
+            0,
+            "queueing a route is not a wire send"
+        );
+        executor.trigger_shutdown();
+        drop(executor.wait_for_shutdown().await);
+        drop((manager, dandelion));
+        task.await.unwrap();
+    }
+}
+
 // Reopen a real transaction pool and recover it with a different current mode.
 // No running node, wallet, blockchain data, or real peer is used by this test.
 #[tokio::test]

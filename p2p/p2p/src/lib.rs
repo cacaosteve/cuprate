@@ -116,11 +116,13 @@ where
     let (make_connection_tx, make_connection_rx) = mpsc::channel(3);
 
     let peer_set = PeerSet::new(new_connection_rx);
+    let transaction_counters = cuprate_p2p_core::TransactionCounters::default();
 
     if config.offline {
         tracing::warn!("Offline mode enabled, not connecting to or listening for peers.");
 
         return Ok(NetworkInterface {
+            transaction_counters,
             peer_set: Buffer::new(peer_set, 10).boxed_clone(),
             broadcast_svc,
             make_connection_tx,
@@ -144,6 +146,7 @@ where
         .with_core_sync_svc(core_sync_svc)
         .with_protocol_request_handler_maker(protocol_request_handler_maker)
         .with_broadcast_stream_maker(outbound_mkr)
+        .with_transaction_counters(transaction_counters.clone())
         .with_connection_parent_span(Span::current());
 
     if let Some(ref cb) = peer_sync_callback {
@@ -219,6 +222,7 @@ where
     );
 
     Ok(NetworkInterface {
+        transaction_counters,
         peer_set: Buffer::new(peer_set, 10).boxed_clone(),
         broadcast_svc,
         make_connection_tx,
@@ -230,6 +234,8 @@ where
 /// The interface to Monero's P2P network on a certain [`NetworkZone`].
 #[derive(Clone)]
 pub struct NetworkInterface<N: NetworkZone> {
+    /// Aggregate transaction diagnostics shared by all connections in this zone.
+    transaction_counters: cuprate_p2p_core::TransactionCounters,
     /// A pool of free connected peers.
     peer_set: BoxCloneService<PeerSetRequest, PeerSetResponse<N>, tower::BoxError>,
     /// A [`Service`] that allows broadcasting to all connected peers.
@@ -244,6 +250,11 @@ pub struct NetworkInterface<N: NetworkZone> {
 }
 
 impl<N: NetworkZone> NetworkInterface<N> {
+    /// Returns the process-lifetime transaction diagnostics for this zone.
+    pub fn transaction_counters(&self) -> cuprate_p2p_core::TransactionCounters {
+        self.transaction_counters.clone()
+    }
+
     /// Returns a service which allows broadcasting messages to all the connected peers in a specific [`NetworkZone`].
     pub fn broadcast_svc(&self) -> BroadcastSvc<N> {
         self.broadcast_svc.clone()

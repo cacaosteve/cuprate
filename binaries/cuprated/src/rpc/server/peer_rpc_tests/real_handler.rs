@@ -34,6 +34,7 @@ fn make_peer<A: NetZoneAddress>(
     let (guard, handle) = HandleBuilder::new().build();
     (
         PeerInformation {
+            transaction_counters: Default::default(),
             connected_at: std::time::Instant::now(),
             id: address.map_or(InternalPeerID::Unknown([8; 16]), InternalPeerID::KnownAddr),
             handle,
@@ -182,6 +183,62 @@ async fn real_rpc_dispatch_reports_live_peers_and_redacts_the_public_listener() 
         .await
         .unwrap();
     launch.peers.set_i2p(&i2p);
+    // The routers predate I2P initialization, but must see its shared counters.
+    // No counters are added to public get_info or per-connection responses.
+    clear.transaction_counters().record_accepted();
+    i2p.transaction_counters().record_accepted();
+    i2p.transaction_counters().record_accepted();
+    let counters_body =
+        serde_json::json!({"jsonrpc":"2.0","id":77,"method":"get_transaction_counters"});
+    let counters = json_request(&admin, "/json_rpc", counters_body.clone()).await;
+    assert_eq!(counters["result"]["status"], "OK");
+    assert_eq!(
+        counters["result"]["clearnet"],
+        serde_json::json!({"received":0,"accepted":1,"relayed":0})
+    );
+    assert_eq!(
+        counters["result"]["i2p"],
+        serde_json::json!({"received":0,"accepted":2,"relayed":0})
+    );
+    assert_eq!(
+        counters["result"]["tor"],
+        serde_json::json!({"received":0,"accepted":0,"relayed":0})
+    );
+    let forbidden = json_request(&public, "/json_rpc", counters_body.clone()).await;
+    assert_eq!(forbidden["error"]["code"], -32601);
+    assert!(forbidden.get("result").is_none());
+    assert!(super::super::super::handlers::json_rpc::map_request(
+        public_handler.clone(),
+        cuprate_rpc_types::json::JsonRpcRequest::GetTransactionCounters(Default::default())
+    )
+    .await
+    .is_err());
+    // Rejected input never reaches the manager's successful-insertion counter.
+    // Wire receipt is counted separately by the connection, not by this handler.
+    let origin = i2p.transaction_counters();
+    let before_invalid = origin.snapshot();
+    let blob = cuprate_test_utils::data::TX_V2_RCT3.tx.serialize();
+    for txs in [
+        vec![bytes::Bytes::from_static(&[0xff; 64])],
+        vec![
+            bytes::Bytes::copy_from_slice(&blob),
+            bytes::Bytes::copy_from_slice(&blob),
+        ],
+    ] {
+        assert!(admin_handler
+            .tx_handler
+            .clone()
+            .oneshot(crate::txpool::IncomingTxs {
+                origin: Some(origin.clone()),
+                txs,
+                state: cuprate_dandelion_tower::TxState::Fluff,
+                drop_relay_rule_errors: true,
+                do_not_relay: false,
+            })
+            .await
+            .is_err());
+        assert_eq!(origin.snapshot(), before_invalid);
+    }
     let (peer, i2p_guard) = make_peer(None, ConnectionDirection::Inbound);
     i2p.address_book()
         .oneshot(AddressBookRequest::NewConnection {
@@ -248,6 +305,11 @@ async fn real_rpc_dispatch_reports_live_peers_and_redacts_the_public_listener() 
     .is_err());
 
     drop((clear_guard, i2p_guard));
+    let after_disconnect = json_request(&admin, "/json_rpc", counters_body).await;
+    assert_eq!(
+        after_disconnect, counters,
+        "disconnects must not reset cumulative totals"
+    );
     let info = json_request(&admin, "/get_info", serde_json::json!({})).await;
     assert_eq!(info["incoming_connections_count"], 0);
     assert_eq!(info["outgoing_connections_count"], 0);

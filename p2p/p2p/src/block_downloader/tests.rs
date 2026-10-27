@@ -256,6 +256,7 @@ fn mock_block_downloader_client(blockchain: Arc<MockBlockchain>) -> Client<Clear
     });
 
     let info = PeerInformation {
+        transaction_counters: Default::default(),
         connected_at: std::time::Instant::now(),
         id: InternalPeerID::Unknown(rand::random()),
         basic_node_data: BasicNodeData {
