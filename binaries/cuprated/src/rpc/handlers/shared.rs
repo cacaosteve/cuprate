@@ -17,6 +17,7 @@ use cuprate_rpc_types::{
     json::{GetOutputDistributionRequest, GetOutputDistributionResponse},
     misc::{Distribution, DistributionCompressedBinary, DistributionUncompressed, OutKeyBin},
 };
+use tracing::info;
 
 use crate::rpc::{
     handlers::helper,
@@ -96,6 +97,18 @@ pub(super) async fn get_output_distribution(
     mut state: CupratedRpcHandler,
     request: GetOutputDistributionRequest,
 ) -> Result<GetOutputDistributionResponse, Error> {
+    let started = std::time::Instant::now();
+    let from_height = request.from_height;
+    let to_height_requested = request.to_height;
+    let cumulative = request.cumulative;
+    let amount_count = request.amounts.len();
+    info!(
+        from_height,
+        to_height = to_height_requested,
+        cumulative,
+        amount_count,
+        "RPC output distribution started"
+    );
     if state.is_restricted() && request.amounts != [0] {
         return Err(anyhow!(
             "Restricted RPC can only get output distribution for RCT outputs. Use your own node."
@@ -177,10 +190,19 @@ pub(super) async fn get_output_distribution(
         })
         .collect();
 
-    Ok(GetOutputDistributionResponse {
+    let response = GetOutputDistributionResponse {
         base: helper::access_response_base(false),
         distributions,
-    })
+    };
+    info!(
+        from_height,
+        to_height = to_height_requested,
+        cumulative,
+        amount_count,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "RPC output distribution computed"
+    );
+    Ok(response)
 }
 
 /// Always returns an [`Error`].
