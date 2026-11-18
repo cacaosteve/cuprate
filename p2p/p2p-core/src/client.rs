@@ -1,5 +1,7 @@
 use std::{
     fmt::{Debug, Display, Formatter},
+    future::Future,
+    pin::Pin,
     sync::{Arc, Mutex},
     task::{ready, Context, Poll},
     time::Instant,
@@ -11,7 +13,6 @@ use tokio_util::sync::{PollSemaphore, PollSender};
 use tower::{Service, ServiceExt};
 use tracing::Instrument;
 
-use cuprate_helper::asynch::InfallibleOneshotReceiver;
 use cuprate_pruning::PruningSeed;
 use cuprate_wire::{BasicNodeData, CoreSyncData};
 
@@ -97,6 +98,21 @@ pub struct Client<Z: NetworkZone> {
     permit: Option<OwnedSemaphorePermit>,
 }
 
+/// A peer response channel that treats a dropped connection as a normal request error.
+pub struct PeerResponseReceiver(oneshot::Receiver<Result<PeerResponse, tower::BoxError>>);
+
+impl Future for PeerResponseReceiver {
+    type Output = Result<PeerResponse, tower::BoxError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::new(&mut self.0).poll(cx) {
+            Poll::Ready(Ok(response)) => Poll::Ready(response),
+            Poll::Ready(Err(_)) => Poll::Ready(Err(PeerError::ClientChannelClosed.into())),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 impl<N: NetworkZone> Clone for Client<N> {
     fn clone(&self) -> Self {
         Self {
@@ -137,7 +153,7 @@ impl<Z: NetworkZone> Client<Z> {
 impl<Z: NetworkZone> Service<PeerRequest> for Client<Z> {
     type Response = PeerResponse;
     type Error = tower::BoxError;
-    type Future = InfallibleOneshotReceiver<Result<Self::Response, Self::Error>>;
+    type Future = PeerResponseReceiver;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         if self.permit.is_none() {
@@ -174,14 +190,14 @@ impl<Z: NetworkZone> Service<PeerRequest> for Client<Z> {
             drop(req.into_inner().unwrap().response_channel.send(resp));
         }
 
-        rx.into()
+        PeerResponseReceiver(rx)
     }
 }
 
 impl<N: NetworkZone> Service<BroadcastMessage> for Client<N> {
     type Response = PeerResponse;
     type Error = tower::BoxError;
-    type Future = InfallibleOneshotReceiver<Result<Self::Response, Self::Error>>;
+    type Future = PeerResponseReceiver;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.permit.take();
@@ -209,7 +225,7 @@ impl<N: NetworkZone> Service<BroadcastMessage> for Client<N> {
             drop(req.into_inner().unwrap().response_channel.send(resp));
         }
 
-        rx.into()
+        PeerResponseReceiver(rx)
     }
 }
 
@@ -258,4 +274,54 @@ where
     let semaphore = Arc::new(Semaphore::new(1));
 
     Client::new(info, tx, semaphore)
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use crate::{handles::HandleBuilder, ClearNet};
+    use cuprate_wire::{common::PeerSupportFlags, AdminRequestMessage};
+
+    #[tokio::test]
+    async fn connection_disappearing_after_readiness_returns_a_peer_error() {
+        let (_guard, handle) = HandleBuilder::new().build();
+        let info = PeerInformation {
+            transaction_counters: Default::default(),
+            connected_at: Instant::now(),
+            id: InternalPeerID::Unknown([0; 16]),
+            handle,
+            direction: ConnectionDirection::Outbound,
+            pruning_seed: PruningSeed::NotPruned,
+            basic_node_data: BasicNodeData {
+                my_port: 0,
+                network_id: crate::Network::Mainnet.network_id(),
+                peer_id: 1,
+                support_flags: PeerSupportFlags::FLUFFY_BLOCKS,
+                rpc_port: 0,
+                rpc_credits_per_hash: 0,
+            },
+            core_sync_data: Arc::new(Mutex::new(CoreSyncData {
+                current_height: 1,
+                cumulative_difficulty: 0,
+                cumulative_difficulty_top64: 0,
+                pruning_seed: 0,
+                top_id: [0; 32],
+                top_version: 0,
+            })),
+        };
+        let (sender, mut receiver) = mpsc::channel(1);
+        let mut client = Client::<ClearNet>::new(info, sender, Arc::new(Semaphore::new(1)));
+        client.ready_peer_request().await.unwrap();
+        let response = Service::<PeerRequest>::call(
+            &mut client,
+            PeerRequest::Admin(AdminRequestMessage::Ping),
+        );
+        receiver.close();
+        drop(receiver);
+        drop(client);
+        assert_eq!(
+            response.await.unwrap_err().to_string(),
+            "The connection tasks client channel was closed"
+        );
+    }
 }
