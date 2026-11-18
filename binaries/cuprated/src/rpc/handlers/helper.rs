@@ -11,12 +11,12 @@ use cuprate_helper::{
     cast::{u64_to_usize, usize_to_u64},
     map::split_u128_into_low_high_bits,
 };
+use cuprate_rpc_interface::RpcHandler;
 use cuprate_rpc_types::{
     base::{AccessResponseBase, ResponseBase},
     misc::BlockHeader,
 };
 use cuprate_types::{Chain, HardFork};
-use monero_oxide::transaction::Timelock;
 
 use crate::rpc::{
     service::{blockchain, blockchain_context},
@@ -35,28 +35,33 @@ pub(super) async fn block_header(
     let block = blockchain::block(&mut state.blockchain_read, height).await?;
     let header = blockchain::block_extended_header(&mut state.blockchain_read, height).await?;
     let hardfork = HardFork::from_vote(header.vote);
-    let (top_height, _) = top_height(state).await?;
+    let (top_height, _) = top_height(state);
 
     // TODO: if the request block is not on the main chain,
     // we must get the alt block and this variable will be `true`.
     let orphan_status = false;
 
-    // TODO: impl cheaper way to get this.
-    // <https://github.com/Cuprate/cuprate/pull/355#discussion_r1904508934>
-    let difficulty = blockchain_context::batch_get_difficulties(
-        &mut state.blockchain_context,
-        vec![(height, hardfork)],
-    )
-    .await?
-    .first()
-    .copied()
-    .ok_or_else(|| anyhow!("Failed to get block difficulty"))?;
+    // Difficulty at height `h` = cumulative_difficulty[h] - cumulative_difficulty[h-1].
+    // For the genesis block there is no predecessor, so difficulty is 1.
+    let difficulty: u128 = if height == 0 {
+        1
+    } else {
+        let prev_header =
+            blockchain::block_extended_header(&mut state.blockchain_read, height - 1).await?;
+        header
+            .cumulative_difficulty
+            .saturating_sub(prev_header.cumulative_difficulty)
+    };
 
-    let pow_hash = if fill_pow_hash {
+    let pow_hash = if fill_pow_hash && !state.is_restricted() {
         let seed_height =
             cuprate_consensus_rules::blocks::randomx_seed_height(u64_to_usize(height));
-        let seed_hash =
-            blockchain::block_hash(&mut state.blockchain_read, height, Chain::Main).await?;
+        let seed_hash = blockchain::block_hash(
+            &mut state.blockchain_read,
+            usize_to_u64(seed_height),
+            Chain::Main,
+        )
+        .await?;
 
         Some(
             blockchain_context::calculate_pow(
@@ -75,9 +80,9 @@ pub(super) async fn block_header(
     let block_weight = usize_to_u64(header.block_weight);
     let depth = top_height.saturating_sub(height);
 
-    let (cumulative_difficulty_top64, cumulative_difficulty) =
+    let (cumulative_difficulty, cumulative_difficulty_top64) =
         split_u128_into_low_high_bits(header.cumulative_difficulty);
-    let (difficulty_top64, difficulty) = split_u128_into_low_high_bits(difficulty);
+    let (difficulty, difficulty_top64) = split_u128_into_low_high_bits(difficulty);
 
     let reward = block
         .miner_transaction()
@@ -131,11 +136,8 @@ pub(super) async fn block_header_by_hash(
 /// # Errors
 /// This returns the [`top_height`] on [`Ok`] and
 /// returns [`Error`] if `height` is greater than [`top_height`].
-pub(super) async fn check_height(
-    state: &mut CupratedRpcHandler,
-    height: u64,
-) -> Result<u64, Error> {
-    let (top_height, _) = top_height(state).await?;
+pub(super) fn check_height(state: &mut CupratedRpcHandler, height: u64) -> Result<u64, Error> {
+    let (top_height, _) = top_height(state);
 
     if height > top_height {
         return Err(anyhow!(
@@ -146,31 +148,15 @@ pub(super) async fn check_height(
     Ok(top_height)
 }
 
-/// Parse a hexadecimal [`String`] as a 32-byte hash.
-#[expect(clippy::needless_pass_by_value)]
-pub(super) fn hex_to_hash(hex: String) -> Result<[u8; 32], Error> {
-    let error = || anyhow!("Failed to parse hex representation of hash. Hex = {hex}.");
-
-    let Ok(bytes) = hex::decode(&hex) else {
-        return Err(error());
-    };
-
-    let Ok(hash) = bytes.try_into() else {
-        return Err(error());
-    };
-
-    Ok(hash)
-}
-
 /// [`cuprate_types::blockchain::BlockchainResponse::ChainHeight`] minus 1.
-pub(super) async fn top_height(state: &mut CupratedRpcHandler) -> Result<(u64, [u8; 32]), Error> {
-    let (chain_height, hash) = blockchain::chain_height(&mut state.blockchain_read).await?;
-    let height = chain_height.checked_sub(1).unwrap();
-    Ok((height, hash))
+pub(super) fn top_height(state: &mut CupratedRpcHandler) -> (u64, [u8; 32]) {
+    let context = state.blockchain_context.blockchain_context();
+    let height = context.chain_height.checked_sub(1).unwrap();
+    (usize_to_u64(height), context.top_hash)
 }
 
 /// TODO: impl bootstrap
-pub const fn response_base(is_bootstrap: bool) -> ResponseBase {
+pub(crate) const fn response_base(is_bootstrap: bool) -> ResponseBase {
     if is_bootstrap {
         ResponseBase::OK_UNTRUSTED
     } else {
@@ -179,7 +165,7 @@ pub const fn response_base(is_bootstrap: bool) -> ResponseBase {
 }
 
 /// TODO: impl bootstrap
-pub const fn access_response_base(is_bootstrap: bool) -> AccessResponseBase {
+pub(crate) const fn access_response_base(is_bootstrap: bool) -> AccessResponseBase {
     if is_bootstrap {
         AccessResponseBase::OK_UNTRUSTED
     } else {

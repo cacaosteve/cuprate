@@ -68,19 +68,23 @@ impl OnionAddr {
             return Err(OnionAddrParsingError::InvalidTld(String::from(tld)));
         }
 
-        // The domain part must only contain base32 characters.
+        // The domain part must only contain base32 characters. monerod also
+        // accepts uppercase characters.
         if !domain
             .as_bytes()
             .iter()
             .copied()
-            .all(|c| c.is_ascii_lowercase() || (b'2'..=b'7').contains(&c))
+            .all(|c| c.is_ascii_alphabetic() || (b'2'..=b'7').contains(&c))
         {
             return Err(OnionAddrParsingError::NonBase32Char);
         }
 
-        Ok(addr.as_bytes()[..56]
+        let mut domain: [u8; 56] = addr.as_bytes()[..56]
             .try_into()
-            .unwrap_or_else(|e| panic!("We just validated address: {addr} : {e}")))
+            .unwrap_or_else(|e| panic!("We just validated address: {addr} : {e}"));
+        domain.make_ascii_lowercase();
+
+        Ok(domain)
     }
 
     /// Generate an onion address string.
@@ -157,6 +161,27 @@ impl From<OnionAddr> for NetworkAddress {
     }
 }
 
+#[cfg(feature = "serde")]
+impl serde::Serialize for OnionAddr {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for OnionAddr {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = <String as serde::Deserialize>::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::{collection::vec, prelude::*};
@@ -197,36 +222,47 @@ mod tests {
 
     proptest! {
         #[test]
-        fn parse_valid_onion_address_w_port(ports in vec(any::<u16>(), 18)) {
-            for (addr,port) in VALID_ONION_ADDRESSES.iter().zip(ports) {
-
-                let mut s = (*addr).to_string();
-                s.push(':');
-                s.push_str(&port.to_string());
-
+        fn parse_random_valid_onion_address(addresses in vec("[[a-z][2-7]]{56}\\.onion", 250)) {
+            for addr in addresses {
                 assert!(
-                    s.parse::<OnionAddr>().is_ok(),
+                    OnionAddr::check_addr(&addr).is_ok(),
                     "Address {addr} has been reported as invalid."
                 );
             }
         }
 
         #[test]
-        fn invalid_onion_address(addresses in vec("[a-z][2-7]{56}.onion", 250)) {
-            for addr in addresses {
+        fn parse_random_valid_onion_address_w_port(
+            mut addresses in vec("[[a-z][2-7]]{56}\\.onion", 250),
+            ports in vec(any::<u16>(), 18)
+        ) {
+            for (addr,port) in addresses.iter_mut().zip(ports) {
+                addr.push(':');
+                addr.push_str(&port.to_string());
+
                 assert!(
-                    OnionAddr::check_addr(&addr).is_err(),
-                    "Address {addr} has been reported as valid."
+                    addr.parse::<OnionAddr>().is_ok(),
+                    "Address {addr} has been reported as invalid."
                 );
             }
         }
 
         #[test]
-        fn parse_invalid_onion_address_w_port(addresses in vec("[a-z][2-7]{56}.onion:[0-9]{1,5}", 250)) {
+        fn parse_random_invalid_onion_address(addresses in vec(".{0,62}", 250)) {
             for addr in addresses {
                 assert!(
                     addr.parse::<OnionAddr>().is_err(),
-                    "Address {addr} has been reported as valid."
+                    "Input {addr} has been parsed correctly."
+                );
+            }
+        }
+
+        #[test]
+        fn parse_random_invalid_onion_address_w_port(addresses in vec(".{0,62}:.{1,5}", 250)) {
+            for addr in addresses {
+                assert!(
+                    addr.parse::<OnionAddr>().is_err(),
+                    "Input {addr} has been parsed correctly."
                 );
             }
         }

@@ -172,7 +172,7 @@ proptest! {
             // we dont need cumulative_difficulties
             cumulative_difficulties: VecDeque::new(),
         };
-        // add the genesis blocks timestamp (always 0)
+        // add the genesis block's timestamp (always 0)
         timestamps.push_front(0);
         timestamps.make_contiguous().sort_unstable();
         prop_assert_eq!(median(timestamps.make_contiguous()), diff_cache.median_timestamp(TEST_WINDOW).unwrap());
@@ -235,7 +235,7 @@ proptest! {
                 new_cache.new_block(new_cache.last_accounted_height+1, timestamp, cumulative_difficulty);
             }
 
-            new_cache.pop_blocks_main_chain(blocks_to_pop, database).await?;
+            new_cache.pop_blocks_main_chain(blocks_to_pop, database).await.unwrap();
 
             prop_assert_eq!(new_cache, old_cache);
 
@@ -259,7 +259,7 @@ proptest! {
                 new_cache.new_block(new_cache.last_accounted_height+1, timestamp, cumulative_difficulty);
             }
 
-            new_cache.pop_blocks_main_chain(blocks_to_pop, database).await?;
+            new_cache.pop_blocks_main_chain(blocks_to_pop, database).await.unwrap();
 
             prop_assert_eq!(new_cache, old_cache);
 

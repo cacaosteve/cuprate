@@ -1,7 +1,3 @@
-#![expect(
-    unused_crate_dependencies,
-    reason = "binary shares same Cargo.toml as library"
-)]
 use std::{fs::write, sync::Arc};
 
 use clap::Parser;
@@ -64,7 +60,7 @@ async fn main() {
 
     let time = std::time::Instant::now();
 
-    let fut = (0..height_target)
+    let fut = (0..(height_target / FAST_SYNC_BATCH_LEN) * FAST_SYNC_BATCH_LEN)
         .step_by(FAST_SYNC_BATCH_LEN)
         .map(|height| {
             let mut read_handle = read_handle.clone();

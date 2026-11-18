@@ -1,7 +1,6 @@
 use std::{
-    cmp::{max, min},
-    marker::PhantomData,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    cmp::min,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     path::Path,
     time::Duration,
 };
@@ -12,22 +11,12 @@ use cuprate_helper::{cast::u64_to_usize, fs::address_book_path, network::Network
 use cuprate_p2p::config::TransportConfig;
 use cuprate_p2p_core::{
     transports::{Tcp, TcpServerConfig},
-    ClearNet, NetworkZone, Tor, Transport,
+    ClearNet, NetworkZone,
 };
 use cuprate_wire::OnionAddr;
 
 use super::{default::DefaultOrCustom, macros::config_struct};
-use crate::{p2p::ProxySettings, tor::TorMode};
-
-#[cfg(feature = "arti")]
-use {
-    arti_client::{
-        config::onion_service::{OnionServiceConfig, OnionServiceConfigBuilder},
-        TorClient, TorClientBuilder, TorClientConfig,
-    },
-    cuprate_p2p_transport::{Arti, ArtiClientConfig, ArtiServerConfig, Socks, SocksClientConfig},
-    tor_rtcompat::PreferredRuntime,
-};
+use crate::p2p::ProxySettings;
 
 config_struct! {
     /// P2P config.
@@ -224,17 +213,27 @@ config_struct! {
         #[comment_out = true]
         /// The proxy to use for outgoing P2P connections
         ///
-        /// This setting can only take "Tor" at the moment.
-        /// This will anonymise clearnet connections through Tor.
+        /// Setting this to "Tor" will anonymise clearnet connections through Tor.
         ///
         /// Setting this to "" (an empty string) will disable the proxy.
         ///
         /// Enabling this setting will disable inbound connections.
         ///
         /// Type         | String
-        /// Valid values | "Tor"
-        /// Examples     | "Tor"
+        /// Valid values | "Tor", "socks5://ip:port", "socks5://user:pass@ip:port"
+        /// Examples     | "Tor", "socks5://127.0.0.1:9050"
         pub proxy: ProxySettings,
+
+        #[comment_out = true]
+        /// Extra seed nodes to connect to on startup, in addition to the
+        /// network's built-in seeds. Given as "ip:port" socket addresses.
+        ///
+        /// FakeChain/regtest ships no built-in seeds, so a private or isolated
+        /// network relies entirely on this list to bootstrap.
+        ///
+        /// Type     | Array of socket addresses
+        /// Examples | "1.2.3.4:18080", "5.6.7.8:18080"
+        pub seed_nodes: Vec<SocketAddr>,
     }
 
     /// The config values for P2P tor.
@@ -266,6 +265,14 @@ config_struct! {
         /// Valid values | false, true
         /// Examples     | false
         pub inbound_onion: bool,
+
+        #[comment_out = true]
+        /// Extra Tor seed nodes to connect to on startup, in addition to the
+        /// built-in seeds. Given as onion addresses.
+        ///
+        /// Type     | Array of onion addresses
+        /// Examples | "zbjkbsxc5munw3qusl7j2hpcmikhqocdf4pqhnhtpzw5nt5jrmofptid.onion:18083"
+        pub seed_nodes: Vec<OnionAddr>,
     }
 }
 
@@ -273,7 +280,7 @@ config_struct! {
 pub const fn p2p_port(setting: DefaultOrCustom<u16>, network: Network) -> u16 {
     match setting {
         DefaultOrCustom::Default => match network {
-            Network::Mainnet => 18080,
+            Network::Mainnet | Network::FakeChain => 18080,
             Network::Stagenet => 38080,
             Network::Testnet => 28080,
         },
@@ -309,11 +316,12 @@ impl Default for ClearNetConfig {
             listen_on: Ipv4Addr::UNSPECIFIED,
             enable_inbound_v6: false,
             listen_on_v6: Ipv6Addr::UNSPECIFIED,
-            proxy: ProxySettings::Socks(String::new()),
+            proxy: ProxySettings::Disabled,
+            seed_nodes: Vec::new(),
             outbound_connections: 32,
             extra_outbound_connections: 8,
             max_inbound_connections: 128,
-            gray_peers_percent: 0.7,
+            gray_peers_percent: 0.3,
             address_book_config: AddressBookConfig::default(),
         }
     }
@@ -324,11 +332,12 @@ impl Default for TorNetConfig {
         Self {
             enabled: false,
             inbound_onion: false,
+            seed_nodes: Vec::new(),
             p2p_port: DefaultOrCustom::Default,
             outbound_connections: 12,
             extra_outbound_connections: 2,
             max_inbound_connections: 128,
-            gray_peers_percent: 0.7,
+            gray_peers_percent: 0.3,
             address_book_config: AddressBookConfig::default(),
         }
     }
@@ -396,8 +405,9 @@ impl AddressBookConfig {
 }
 
 /// Seed nodes for [`ClearNet`].
-pub fn clear_net_seed_nodes(network: Network) -> Vec<SocketAddr> {
+pub(crate) fn clear_net_seed_nodes(network: Network) -> Vec<SocketAddr> {
     let seeds = match network {
+        Network::FakeChain => [].as_slice(),
         Network::Mainnet => [
             "176.9.0.187:18080",
             "88.198.163.90:18080",
@@ -434,18 +444,18 @@ pub fn clear_net_seed_nodes(network: Network) -> Vec<SocketAddr> {
 }
 
 /// Seed nodes for `Tor`.
-pub fn tor_net_seed_nodes(network: Network) -> Vec<OnionAddr> {
+pub(crate) fn tor_net_seed_nodes(network: Network) -> Vec<OnionAddr> {
     let seeds = match network {
         Network::Mainnet => [
             "zbjkbsxc5munw3qusl7j2hpcmikhqocdf4pqhnhtpzw5nt5jrmofptid.onion:18083",
-            "qz43zul2x56jexzoqgkx2trzwcfnr6l3hbtfcfx54g4r3eahy3bssjyd.onion:18083",
+            "lykcas4tus7mkm4bhsgqe4drtd4awi7gja24goscc47xfgzj54yofyqd.onion:18083",
             "plowsof3t5hogddwabaeiyrno25efmzfxyro2vligremt7sxpsclfaid.onion:18083",
             "plowsoffjexmxalw73tkjmf422gq6575fc7vicuu4javzn2ynnte6tyd.onion:18083",
             "plowsofe6cleftfmk2raiw5h2x66atrik3nja4bfd3zrfa2hdlgworad.onion:18083",
             "aclc4e2jhhtr44guufbnwk5bzwhaecinax4yip4wr4tjn27sjsfg6zqd.onion:18083",
         ]
         .as_slice(),
-        Network::Stagenet | Network::Testnet => [].as_slice(),
+        Network::FakeChain | Network::Stagenet | Network::Testnet => [].as_slice(),
     };
 
     seeds

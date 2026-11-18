@@ -544,6 +544,7 @@ define_struct_and_impl_epee! {
         added_pool_txs: Vec<PoolTxInfo>,
         remaining_added_pool_txids: ByteArrayVec<32>,
     }
+
 }
 
 //---------------------------------------------------------------------------------------------------- Tests

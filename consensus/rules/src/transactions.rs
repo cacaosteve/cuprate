@@ -1,5 +1,6 @@
-use curve25519_dalek::EdwardsPoint;
+use curve25519_dalek::traits::IsIdentity;
 use monero_oxide::{
+    ed25519::Point,
     ringct::RctType,
     transaction::{Input, Output, Timelock, Transaction},
 };
@@ -25,9 +26,9 @@ const MAX_TX_BLOB_SIZE: usize = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TransactionError {
-    #[error("The transactions version is incorrect.")]
+    #[error("The transaction's version is incorrect.")]
     TransactionVersionInvalid,
-    #[error("The transactions is too big.")]
+    #[error("The transaction is too big.")]
     TooBig,
     //-------------------------------------------------------- OUTPUTS
     #[error("Output is not a valid point.")]
@@ -40,11 +41,11 @@ pub enum TransactionError {
     NonZeroOutputForV2,
     #[error("The transaction has an output which is not decomposed.")]
     AmountNotDecomposed,
-    #[error("The transactions outputs overflow.")]
+    #[error("The transaction's outputs overflow.")]
     OutputsOverflow,
-    #[error("The transactions outputs too much.")]
+    #[error("The transaction's outputs are too much.")]
     OutputsTooHigh,
-    #[error("The transactions has too many outputs.")]
+    #[error("The transaction has too many outputs.")]
     InvalidNumberOfOutputs,
     //-------------------------------------------------------- INPUTS
     #[error("One or more inputs don't have the expected number of decoys.")]
@@ -75,6 +76,8 @@ pub enum TransactionError {
     //-------------------------------------------------------- RingCT
     #[error("RingCT Error: {0}.")]
     RingCTError(#[from] RingCTError),
+    #[error("Transaction batch verification failed.")]
+    BatchVerificationFailed,
 }
 
 //----------------------------------------------------------------------------------------------------------- OUTPUTS
@@ -326,11 +329,11 @@ fn check_key_images(input: &Input) -> Result<(), TransactionError> {
     match input {
         Input::ToKey { key_image, .. } => {
             // this happens in monero-oxide but we may as well duplicate the check.
-            if !key_image
-                .decompress()
-                .as_ref()
-                .is_some_and(EdwardsPoint::is_torsion_free)
-            {
+            if !key_image.decompress().as_ref().is_some_and(|p| {
+                let p = Point::into(*p);
+
+                p.is_torsion_free() && !p.is_identity()
+            }) {
                 return Err(TransactionError::KeyImageIsNotInPrimeSubGroup);
             }
         }

@@ -1,4 +1,4 @@
-use std::cmp::max;
+use std::cmp::{max, min};
 
 use monero_oxide::transaction::Timelock;
 use thiserror::Error;
@@ -20,7 +20,7 @@ const DYNAMIC_FEE_REFERENCE_TRANSACTION_WEIGHT: u128 = 3_000;
 const FEE_MASK: u64 = 10_u64.pow(4);
 
 #[derive(Debug, Error)]
-pub enum RelayRuleError {
+pub(crate) enum RelayRuleError {
     #[error("Tx has non-zero timelock.")]
     NonZeroTimelock,
     #[error("Tx extra field is too large.")]
@@ -32,7 +32,7 @@ pub enum RelayRuleError {
 /// Checks the transaction passes the relay rules.
 ///
 /// Relay rules are rules that govern the txs we accept to our tx-pool and propagate around the network.
-pub fn check_tx_relay_rules(
+pub(crate) fn check_tx_relay_rules(
     tx: &TransactionVerificationData,
     context: &BlockchainContext,
 ) -> Result<(), RelayRuleError> {
@@ -60,7 +60,13 @@ fn check_fee(
         context.current_hf,
     );
 
-    let fee_per_byte = dynamic_base_fee(base_reward, context.effective_median_weight);
+    let fee_per_byte = dynamic_base_fee(
+        base_reward,
+        min(
+            context.effective_median_weight,
+            context.long_term_effective_median_weight(),
+        ),
+    );
     let needed_fee = usize_to_u64(tx_weight) * fee_per_byte;
 
     let needed_fee = needed_fee.div_ceil(FEE_MASK) * FEE_MASK;

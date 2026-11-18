@@ -1,4 +1,3 @@
-#![expect(unused_crate_dependencies, reason = "external test module")]
 #![expect(clippy::allow_attributes, reason = "usage inside macro")]
 
 use std::{
@@ -10,12 +9,14 @@ use std::{
 use curve25519_dalek::constants::ED25519_BASEPOINT_COMPRESSED;
 use indexmap::IndexMap;
 use monero_oxide::{
-    io::CompressedPoint,
+    ed25519::CompressedPoint,
     transaction::{Timelock, Transaction},
 };
 use tower::service_fn;
 
-use cuprate_consensus::{__private::Database, transactions::start_tx_verification};
+use cuprate_consensus::{
+    __private::Database, transactions::start_tx_verification, VerificationContext,
+};
 use cuprate_types::{
     blockchain::{BlockchainReadRequest, BlockchainResponse},
     output_cache::OutputCache,
@@ -78,8 +79,8 @@ macro_rules! test_verify_valid_v2_tx {
                 OutputOnChain {
                     height: 0,
                     time_lock: Timelock::None,
-                    commitment: CompressedPoint(hex_literal::hex!($commitment)),
-                    key: CompressedPoint(hex_literal::hex!($ring_member)),
+                    commitment: CompressedPoint::from(hex_literal::hex!($commitment)),
+                    key: CompressedPoint::from(hex_literal::hex!($ring_member)),
                     txid: None,
                 }),)+)+
             ];
@@ -94,7 +95,7 @@ macro_rules! test_verify_valid_v2_tx {
                 )
                 .prepare()
                 .unwrap()
-                .full(10, [0; 32], u64::MAX, HardFork::$hf, database.clone(), None)
+                .full(10, [0; 32], u64::MAX, HardFork::$hf, &mut VerificationContext::Database(database.clone()))
                 .verify()
                 .await.is_ok()
             );
@@ -106,8 +107,8 @@ macro_rules! test_verify_valid_v2_tx {
                 OutputOnChain {
                     height: 0,
                     time_lock: Timelock::None,
-                    commitment: CompressedPoint::from(ED25519_BASEPOINT_COMPRESSED),
-                    key: CompressedPoint(hex_literal::hex!($ring_member)),
+                    commitment: CompressedPoint::from(ED25519_BASEPOINT_COMPRESSED.0),
+                    key: CompressedPoint::from(hex_literal::hex!($ring_member)),
                     txid: None,
                 }),)+)+
             ];
@@ -122,7 +123,7 @@ macro_rules! test_verify_valid_v2_tx {
                 )
                 .prepare()
                 .unwrap()
-                .full(10, [0; 32], u64::MAX, HardFork::$hf, database.clone(), None)
+                .full(10, [0; 32], u64::MAX, HardFork::$hf, &mut VerificationContext::Database(database.clone()))
                 .verify()
                 .await.is_err()
             );

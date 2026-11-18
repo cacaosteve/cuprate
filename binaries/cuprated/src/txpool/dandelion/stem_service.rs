@@ -1,5 +1,4 @@
 use std::{
-    future::Future,
     pin::Pin,
     task::{ready, Context, Poll},
 };
@@ -12,20 +11,20 @@ use cuprate_dandelion_tower::{traits::StemRequest, OutboundPeer};
 use cuprate_p2p::{ClientDropGuard, NetworkInterface, PeerSetRequest, PeerSetResponse};
 use cuprate_p2p_core::{
     client::{Client, InternalPeerID},
-    BroadcastMessage, ClearNet, NetworkZone, PeerRequest, ProtocolRequest, Tor,
+    BroadcastMessage, NetworkZone,
 };
 use cuprate_wire::protocol::NewTransactions;
 
 use crate::{p2p::CrossNetworkInternalPeerId, txpool::dandelion::DandelionTx};
 
 /// The dandelion outbound peer stream.
-pub struct OutboundPeerStream<Z: NetworkZone> {
+pub(crate) struct OutboundPeerStream<Z: NetworkZone> {
     network_interface: NetworkInterface<Z>,
     state: OutboundPeerStreamState<Z>,
 }
 
 impl<Z: NetworkZone> OutboundPeerStream<Z> {
-    pub const fn new(network_interface: NetworkInterface<Z>) -> Self {
+    pub(crate) const fn new(network_interface: NetworkInterface<Z>) -> Self {
         Self {
             network_interface,
             state: OutboundPeerStreamState::Standby,
@@ -45,7 +44,9 @@ where
             match &mut self.state {
                 OutboundPeerStreamState::Standby => {
                     let peer_set = self.network_interface.peer_set();
-                    let res = ready!(peer_set.poll_ready(cx));
+                    if let Err(res) = ready!(peer_set.poll_ready(cx)) {
+                        return Poll::Ready(Some(Err(res)));
+                    }
 
                     self.state = OutboundPeerStreamState::AwaitingPeer(
                         peer_set.call(PeerSetRequest::StemPeer).boxed(),
@@ -83,20 +84,19 @@ enum OutboundPeerStreamState<Z: NetworkZone> {
 }
 
 /// The stem service, used to send stem txs.
-pub struct StemPeerService<N: NetworkZone>(ClientDropGuard<N>);
+pub(crate) struct StemPeerService<N: NetworkZone>(ClientDropGuard<N>);
 
 impl<N: NetworkZone> Service<StemRequest<DandelionTx>> for StemPeerService<N> {
-    type Response = <Client<N> as Service<PeerRequest>>::Response;
+    type Response = <Client<N> as Service<BroadcastMessage>>::Response;
     type Error = tower::BoxError;
-    type Future = <Client<N> as Service<PeerRequest>>::Future;
+    type Future = <Client<N> as Service<BroadcastMessage>>::Future;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.0.broadcast_client().poll_ready(cx)
+        Service::<BroadcastMessage>::poll_ready(&mut *self.0, cx)
     }
 
     fn call(&mut self, req: StemRequest<DandelionTx>) -> Self::Future {
         self.0
-            .broadcast_client()
             .call(BroadcastMessage::NewTransactions(NewTransactions {
                 txs: vec![req.0 .0],
                 dandelionpp_fluff: false,

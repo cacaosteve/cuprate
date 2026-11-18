@@ -18,7 +18,8 @@ use crate::{
         OutputHistogramInput,
     },
     types::{Chain, ExtendedBlockHeader, OutputOnChain, TxsInBlock, VerifiedBlockInformation},
-    AltBlockInformation, BlockCompleteEntry, ChainId, OutputDistributionInput, TxInBlockchain,
+    AltBlockInformation, BlockCompleteEntry, ChainId, PreRctOutputDistributionInput,
+    TxInBlockchain,
 };
 
 //---------------------------------------------------------------------------------------------------- ReadRequest
@@ -33,14 +34,30 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockchainReadRequest {
     /// Request [`BlockCompleteEntry`]s.
-    ///
-    /// The input is the block hashes.
-    BlockCompleteEntries(Vec<[u8; 32]>),
+    BlockCompleteEntries {
+        /// The block hashes.
+        block_hashes: Vec<[u8; 32]>,
+        /// If `true`, strip the prunable tx data.
+        prune: bool,
+    },
 
     /// Request [`BlockCompleteEntry`]s.
     ///
     /// The input is the block heights.
     BlockCompleteEntriesByHeight(Vec<usize>),
+
+    /// Request [`BlockCompleteEntry`]s (and output indices) for the
+    /// blocks above the split point between our chain and the given chain.
+    BlockCompleteEntriesAboveSplitPoint {
+        chain: Vec<[u8; 32]>,
+        /// If `Some`, skip the chain scan and start serving from this height directly.
+        start_height: Option<usize>,
+        /// If `true`, each block's miner-tx entry in the output indices is an
+        /// empty placeholder.
+        no_miner_tx: bool,
+        len: usize,
+        prune: bool,
+    },
 
     /// Request a block's extended header.
     ///
@@ -79,6 +96,9 @@ pub enum BlockchainReadRequest {
 
     /// Request the total amount of generated coins (atomic units) at this height.
     GeneratedCoins(usize),
+
+    /// Request the cumulative RCT output count for the main-chain blocks in this height range.
+    CumulativeRctOutsInRange(Range<usize>),
 
     /// Request data for multiple outputs.
     ///
@@ -182,11 +202,11 @@ pub enum BlockchainReadRequest {
     /// TODO: document fields after impl.
     OutputHistogram(OutputHistogramInput),
 
-    /// Get the distribution for an output amount.
+    /// Get the distribution for a pre-RCT output amount.
     ///
     /// - TODO: document fields after impl.
     /// - TODO: <https://github.com/monero-project/monero/blob/893916ad091a92e765ce3241b94e706ad012b62a/src/rpc/rpc_handler.cpp#L29>
-    OutputDistribution(OutputDistributionInput),
+    PreRctOutputDistribution(PreRctOutputDistributionInput),
 
     /// Get the coinbase amount and the fees amount for
     /// `N` last blocks starting at particular height.
@@ -201,7 +221,9 @@ pub enum BlockchainReadRequest {
     AltChainCount,
 
     /// Get transaction blobs by their hashes.
-    Transactions { tx_hashes: HashSet<[u8; 32]> },
+    ///
+    /// Returned transactions must preserve request order, omitting missing hashes.
+    Transactions { tx_hashes: Vec<[u8; 32]> },
 
     /// Get the total amount of RCT outputs in the blockchain.
     TotalRctOutputs,
@@ -221,7 +243,7 @@ pub enum BlockchainWriteRequest {
 
     /// Request that a batch of blocks be written to the database.
     ///
-    /// Input is an already verified batch of blocks.
+    /// Input is an already verified batch of blocks, must not be empty.
     BatchWriteBlocks(Vec<VerifiedBlockInformation>),
 
     /// Write an alternative block to the database,
@@ -231,11 +253,12 @@ pub enum BlockchainWriteRequest {
 
     /// A request to pop some blocks from the top of the main chain
     ///
-    /// Input is the amount of blocks to pop.
+    /// Input is the amount of blocks to pop and a bool for if the popped blocks should be added as
+    /// alt blocks.
     ///
     /// This request flushes all alt-chains from the cache before adding the popped blocks to the
-    /// alt cache.
-    PopBlocks(usize),
+    /// alt cache, if requested to do so.
+    PopBlocks(usize, bool),
 
     /// A request to flush all alternative blocks.
     FlushAltBlocks,
@@ -264,6 +287,22 @@ pub enum BlockchainResponse {
 
     /// Response to [`BlockchainReadRequest::BlockCompleteEntriesByHeight`].
     BlockCompleteEntriesByHeight(Vec<BlockCompleteEntry>),
+
+    /// Response to [`BlockchainReadRequest::BlockCompleteEntriesAboveSplitPoint`].
+    BlockCompleteEntriesAboveSplitPoint {
+        /// The [`BlockCompleteEntry`]s that we had.
+        blocks: Vec<BlockCompleteEntry>,
+        /// The output indices of all transaction outputs across all blocks.
+        ///
+        /// `output_indices[block][tx][output]`, including the miner tx (miner tx will be empty if not requested).
+        output_indices: Vec<Vec<Vec<u64>>>,
+        /// Our blockchain height.
+        blockchain_height: usize,
+        /// The height the returned blocks start from.
+        start_height: usize,
+        /// Hash of the current top block.
+        top_hash: [u8; 32],
+    },
 
     /// Response to [`BlockchainReadRequest::BlockExtendedHeader`].
     ///
@@ -304,6 +343,11 @@ pub enum BlockchainResponse {
     ///
     /// Inner value is the total amount of generated coins up to and including the chosen height, in atomic units.
     GeneratedCoins(u64),
+
+    /// Response to [`BlockchainReadRequest::CumulativeRctOutsInRange`].
+    ///
+    /// Inner value is `cumulative_rct_outs` for each block in the requested range.
+    CumulativeRctOutsInRange(Vec<u64>),
 
     /// Response to [`BlockchainReadRequest::Outputs`].
     ///
@@ -399,8 +443,8 @@ pub enum BlockchainResponse {
         free_space: u64,
     },
 
-    /// Response to [`BlockchainReadRequest::OutputDistribution`].
-    OutputDistribution(Vec<OutputDistributionData>),
+    /// Response to [`BlockchainReadRequest::PreRctOutputDistribution`].
+    PreRctOutputDistribution(Vec<OutputDistributionData>),
 
     /// Response to [`BlockchainReadRequest::OutputHistogram`].
     OutputHistogram(Vec<OutputHistogramEntry>),
@@ -440,7 +484,7 @@ pub enum BlockchainResponse {
     /// Response to [`BlockchainWriteRequest::PopBlocks`].
     ///
     /// The inner value is the alt-chain ID for the old main chain blocks.
-    PopBlocks(ChainId),
+    PopBlocks(Option<ChainId>),
 }
 
 //---------------------------------------------------------------------------------------------------- Tests

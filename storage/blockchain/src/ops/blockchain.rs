@@ -23,10 +23,7 @@ use crate::{
 ///
 /// So the height of a new block would be `chain_height()`.
 #[inline]
-pub fn chain_height(
-    db: &BlockchainDatabase,
-    tapes: &tapes::TapesReadTransaction,
-) -> DbResult<BlockHeight> {
+pub fn chain_height(db: &BlockchainDatabase, tapes: &impl TapesRead) -> DbResult<BlockHeight> {
     Ok(u64_to_usize(
         tapes
             .fixed_sized_tape_len(&db.block_infos)
@@ -79,7 +76,8 @@ pub fn find_split_point(
 
     let block_exists = |block_id| {
         Ok(tx_ro.contains_key(&db.block_heights, block_id)?
-            || (include_alt_blocks && tx_ro.contains_key(&db.alt_block_heights, block_id)?))
+            || (include_alt_blocks
+                && tx_ro.contains_key(&**db.alt_block_heights.load(), block_id)?))
     };
 
     // Do a binary search to find the first unknown/known block in the batch.

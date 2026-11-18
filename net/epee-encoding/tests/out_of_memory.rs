@@ -1,5 +1,3 @@
-#![expect(unused_crate_dependencies, reason = "outer test module")]
-
 use cuprate_epee_encoding::{epee_object, from_bytes};
 
 struct T {
@@ -20,7 +18,7 @@ fn out_of_memory() {
         // struct + field
         0x04, 0x01, b'a',
         // field tag
-        0x80 | 10,
+        0x80 | 0x0a,
         // varint length of len
         0x03,
         // len, as big as possible

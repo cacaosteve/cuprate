@@ -1,5 +1,3 @@
-#![expect(unused_crate_dependencies, reason = "external test module")]
-
 use tower::{Service, ServiceExt};
 
 use cuprate_helper::network::Network;
@@ -42,7 +40,7 @@ async fn get_single_block_from_monerod() {
         .unwrap();
 
     let PeerResponse::Protocol(ProtocolResponse::GetObjects(obj)) = connected_peer
-        .ready()
+        .ready_peer_request()
         .await
         .unwrap()
         .call(PeerRequest::Protocol(ProtocolRequest::GetObjects(
@@ -53,7 +51,7 @@ async fn get_single_block_from_monerod() {
                 .unwrap()
                 .try_into()
                 .unwrap(),
-                pruned: false,
+                prune: false,
             },
         )))
         .await

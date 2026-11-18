@@ -41,7 +41,10 @@ impl EpeeObjectBuilder<NetworkAddress> for TaggedNetworkAddress {
             "type" => {
                 if self
                     .ty
-                    .replace(cuprate_epee_encoding::read_epee_value(b)?)
+                    .replace(cuprate_epee_encoding::read_epee_value(
+                        b,
+                        Default::default(),
+                    )?)
                     .is_some()
                 {
                     return Err(cuprate_epee_encoding::Error::Format(
@@ -51,8 +54,11 @@ impl EpeeObjectBuilder<NetworkAddress> for TaggedNetworkAddress {
                 Ok(true)
             }
             "addr" => {
-                if std::mem::replace(&mut self.addr, cuprate_epee_encoding::read_epee_value(b)?)
-                    .is_some()
+                if std::mem::replace(
+                    &mut self.addr,
+                    cuprate_epee_encoding::read_epee_value(b, Default::default())?,
+                )
+                .is_some()
                 {
                     return Err(cuprate_epee_encoding::Error::Format(
                         "Duplicate field in data.",
@@ -65,8 +71,14 @@ impl EpeeObjectBuilder<NetworkAddress> for TaggedNetworkAddress {
     }
 
     fn finish(self) -> cuprate_epee_encoding::Result<NetworkAddress> {
-        self.try_into()
-            .map_err(|_| cuprate_epee_encoding::Error::Value("Invalid network address".to_string()))
+        let ty = self.ty;
+        let host = self.addr.as_ref().and_then(|a| a.host.clone());
+
+        self.try_into().map_err(|_| {
+            cuprate_epee_encoding::Error::Value(format!(
+                "Invalid network address (type: {ty:?}, host: {host:?})"
+            ))
+        })
     }
 }
 

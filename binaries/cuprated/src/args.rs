@@ -1,0 +1,170 @@
+use std::{net::SocketAddr, path::PathBuf, process::exit, str::FromStr};
+
+use clap::builder::TypedValueParser;
+
+use cuprate_helper::network::Network;
+use cuprate_wire::OnionAddr;
+
+use cuprated::{config::Config, version::CupratedVersionInfo};
+
+#[derive(Debug, Clone)]
+pub(crate) enum SeedNodeArg {
+    Clear(SocketAddr),
+    Tor(OnionAddr),
+}
+
+impl FromStr for SeedNodeArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(addr) = s.parse::<SocketAddr>() {
+            Ok(Self::Clear(addr))
+        } else if let Ok(addr) = s.parse::<OnionAddr>() {
+            Ok(Self::Tor(addr))
+        } else {
+            Err(format!(
+                "'{s}' is not a valid seed node address; expected either \
+                     an \"ip:port\" or \"<56-character onion domain>.onion:port\" address"
+            ))
+        }
+    }
+}
+
+/// Cuprate Args.
+#[derive(clap::Parser, Debug)]
+#[command(about)]
+pub(crate) struct Args {
+    /// The network to run on.
+    #[arg(
+        long,
+        value_parser = clap::builder::PossibleValuesParser::new(["mainnet", "testnet", "stagenet", "fakechain"])
+            .map(|s| s.parse::<Network>().unwrap()),
+    )]
+    pub network: Option<Network>,
+
+    /// Run in regtest mode.
+    ///
+    /// Equivalent to `--network=fakechain`. Uses mainnet's network ID, genesis block and
+    /// ports but activates the latest hard-fork at height 1, matching monerod's `--regtest`.
+    #[arg(long)]
+    pub regtest: bool,
+
+    /// Force the difficulty cache to always return this value.
+    ///
+    /// Only intended for regtest. Must be used with `--regtest` (or `--network=fakechain`).
+    #[arg(long)]
+    pub fixed_difficulty: Option<u128>,
+
+    /// Disable fast sync, all past blocks will undergo full verification when syncing.
+    ///
+    /// This significantly increases initial sync time. This provides no extra security, you just
+    /// have to trust the devs to insert the correct hashes (which are verifiable).
+    #[arg(long)]
+    no_fast_sync: bool,
+
+    /// Do not connect to or listen for peers.
+    #[arg(long)]
+    pub offline: bool,
+
+    /// The amount of outbound clear-net connections to maintain.
+    #[arg(long)]
+    pub outbound_connections: Option<usize>,
+
+    /// An extra seed node to connect to on startup, in addition to the
+    /// network's built-in seeds.
+    ///
+    /// Accepts either a clearnet "ip:port" address, or a Tor
+    /// "<56-character onion domain>.onion:port" address; the former is added
+    /// to the clearnet seed list, the latter to the Tor seed list.
+    ///
+    /// Can be passed multiple times. `FakeChain` has no built-in seeds, so
+    /// this is how a regtest or otherwise isolated network is bootstrapped.
+    #[arg(long, value_name = "IP:PORT|ONION:PORT")]
+    pub seed_node: Vec<SeedNodeArg>,
+
+    /// The PATH of the `cuprated` config file.
+    #[arg(long)]
+    pub config_file: Option<PathBuf>,
+
+    /// Generate a config file and print it to stdout.
+    #[arg(long)]
+    pub generate_config: bool,
+
+    /// Stops the missing config warning and startup delay if a config file is missing.
+    #[arg(long)]
+    pub skip_config_warning: bool,
+
+    /// Print misc version information in JSON.
+    #[arg(short, long)]
+    pub version: bool,
+
+    /// Perform a dry run to validate configuration.
+    ///
+    /// This will verify:
+    /// - Config file can be deserialized correctly
+    /// - All specified paths exist and have proper permissions
+    /// - Required network ports can be bound to
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Prune the blockchain.
+    ///
+    /// Note that once a node is pruned it cannot be un-pruned.
+    #[arg(long)]
+    pub prune: bool,
+}
+
+impl Args {
+    /// Complete any quick requests asked for in [`Args`].
+    ///
+    /// May cause the process to [`exit`].
+    pub(crate) fn do_quick_requests(&self) {
+        if self.version {
+            let version_info = CupratedVersionInfo::new();
+            let json = serde_json::to_string_pretty(&version_info).unwrap();
+            println!("{json}");
+            exit(0);
+        }
+
+        if self.generate_config {
+            println!("{}", Config::documented_config());
+            exit(0);
+        }
+    }
+
+    /// Apply the [`Args`] to the given [`Config`].
+    ///
+    /// This may exit the program if a config value was set that requires an early exit.
+    pub(crate) fn apply_args(&self, mut config: Config) -> Config {
+        if let Some(network) = self.network {
+            config.network = network;
+        }
+        if self.regtest {
+            config.network = Network::FakeChain;
+        }
+        if self.offline {
+            config.offline = true;
+        }
+        if let Some(fixed_difficulty) = self.fixed_difficulty {
+            config.fixed_difficulty = fixed_difficulty;
+        }
+        config.fast_sync = config.fast_sync && !self.no_fast_sync;
+
+        if let Some(outbound_connections) = self.outbound_connections {
+            config.p2p.clear_net.outbound_connections = outbound_connections;
+        }
+
+        if self.prune {
+            config.storage.blockchain.prune = true;
+        }
+
+        for seed_node in &self.seed_node {
+            match seed_node {
+                SeedNodeArg::Clear(addr) => config.p2p.clear_net.seed_nodes.push(*addr),
+                SeedNodeArg::Tor(addr) => config.p2p.tor_net.seed_nodes.push(*addr),
+            }
+        }
+
+        config
+    }
+}

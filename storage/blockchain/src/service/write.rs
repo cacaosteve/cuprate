@@ -9,18 +9,19 @@ use std::{
 use crossbeam::channel::Receiver;
 use fjall::PersistMode;
 use futures::channel::oneshot;
-use tapes::Persistence;
 use tapes::TapesRead;
 use tower::Service;
 use tracing::instrument;
 
 use cuprate_helper::cast::u64_to_usize;
+use cuprate_pruning::CRYPTONOTE_PRUNING_TIP_BLOCKS;
 use cuprate_types::{
     blockchain::{BlockchainResponse, BlockchainWriteRequest},
     AltBlockInformation, ChainId, VerifiedBlockInformation,
 };
 
 use crate::{
+    config::Persistence,
     error::{BlockchainError, DbResult},
     ops::block::add_blocks_to_tapes,
     service::ResponseResult,
@@ -110,7 +111,9 @@ fn handle_blockchain_request(
         BlockchainWriteRequest::WriteBlock(block) => write_block(env, block),
         BlockchainWriteRequest::BatchWriteBlocks(blocks) => write_blocks(env, blocks),
         BlockchainWriteRequest::WriteAltBlock(alt_block) => write_alt_block(env, alt_block),
-        BlockchainWriteRequest::PopBlocks(numb_blocks) => pop_blocks(env, *numb_blocks),
+        BlockchainWriteRequest::PopBlocks(numb_blocks, keep) => {
+            pop_blocks(env, *numb_blocks, *keep)
+        }
         BlockchainWriteRequest::FlushAltBlocks => flush_alt_blocks(env),
     }
 }
@@ -135,6 +138,19 @@ fn write_block(db: &BlockchainDatabase, block: &VerifiedBlockInformation) -> Res
 #[inline]
 #[instrument(skip(db, blocks), level = "debug")]
 fn write_blocks(db: &BlockchainDatabase, blocks: &[VerifiedBlockInformation]) -> ResponseResult {
+    debug_assert!(blocks.len() <= CRYPTONOTE_PRUNING_TIP_BLOCKS);
+    let (tapes_persist_mode, fjall_persist_mode) = match db.config.persistence {
+        Persistence::Buffer => (tapes::Persistence::Buffer, PersistMode::Buffer),
+        // We use the amount of blocks to write as a heuristic for if we are synced. When Cuprate starts downloading
+        // blocks it will do 1 at a time so for that those will be fully synced but that does not last long.
+        Persistence::BufferThenSync if blocks.len() > 1 => {
+            (tapes::Persistence::Buffer, PersistMode::Buffer)
+        }
+        Persistence::Sync | Persistence::BufferThenSync => {
+            (tapes::Persistence::SyncAll, PersistMode::SyncAll)
+        }
+    };
+
     tracing::debug!("Writing {} block(s) to database.", blocks.len());
 
     let mut tapes = db.linear_tapes.append();
@@ -145,11 +161,10 @@ fn write_blocks(db: &BlockchainDatabase, blocks: &[VerifiedBlockInformation]) ->
 
     add_blocks_to_tapes(blocks, db, &mut tapes)?;
 
-    tapes.commit(Persistence::Buffer)?;
+    tapes.commit(tapes_persist_mode)?;
 
     let mut pre_rct_numb_outputs_cache = db.pre_rct_numb_outputs_cache.lock().unwrap();
-
-    let mut tx_rw = db.fjall.batch().durability(Some(PersistMode::Buffer));
+    let mut tx_rw = db.fjall.batch().durability(Some(fjall_persist_mode));
 
     for block in blocks {
         crate::ops::block::add_block_to_dynamic_tables(
@@ -171,7 +186,7 @@ fn write_blocks(db: &BlockchainDatabase, blocks: &[VerifiedBlockInformation]) ->
 /// [`BlockchainWriteRequest::WriteAltBlock`].
 #[inline]
 fn write_alt_block(db: &BlockchainDatabase, block: &AltBlockInformation) -> ResponseResult {
-    let mut tx_rw = db.fjall.batch();
+    let mut tx_rw = db.fjall.batch().durability(Some(PersistMode::SyncAll));
 
     crate::ops::alt_block::add_alt_block(db, block, &mut tx_rw)?;
 
@@ -181,15 +196,15 @@ fn write_alt_block(db: &BlockchainDatabase, block: &AltBlockInformation) -> Resp
 }
 
 /// [`BlockchainWriteRequest::PopBlocks`].
-fn pop_blocks(db: &BlockchainDatabase, numb_blocks: usize) -> ResponseResult {
+fn pop_blocks(db: &BlockchainDatabase, numb_blocks: usize, keep_blocks: bool) -> ResponseResult {
     let mut tapes = db.linear_tapes.truncate();
-    let mut tx_rw = db.fjall.batch();
+    let mut tx_rw = db.fjall.batch().durability(Some(PersistMode::SyncAll));
 
     // flush all the current alt blocks as they may reference blocks to be popped.
     crate::ops::alt_block::flush_alt_blocks(db)?;
 
     // generate a `ChainId` for the popped blocks.
-    let old_main_chain_id = ChainId(rand::random());
+    let mut old_main_chain_id = keep_blocks.then_some(ChainId(rand::random()));
 
     assert!(tapes
         .fixed_sized_tape_len(&db.block_infos)
@@ -197,11 +212,21 @@ fn pop_blocks(db: &BlockchainDatabase, numb_blocks: usize) -> ResponseResult {
 
     // pop the blocks
     for _ in 0..numb_blocks {
-        crate::ops::block::pop_block(db, Some(old_main_chain_id), &mut tx_rw, &mut tapes)?;
+        let (.., added_to_alt_chain) =
+            crate::ops::block::pop_block(db, old_main_chain_id, &mut tx_rw, &mut tapes)?;
+
+        if old_main_chain_id.is_some() && !added_to_alt_chain {
+            old_main_chain_id = None;
+        }
     }
 
+    tapes.commit(tapes::Persistence::SyncAll)?;
     tx_rw.commit()?;
-    tapes.commit(Persistence::SyncAll)?;
+
+    if keep_blocks && old_main_chain_id.is_none() {
+        crate::ops::alt_block::flush_alt_blocks(db)?;
+    }
+
     Ok(BlockchainResponse::PopBlocks(old_main_chain_id))
 }
 

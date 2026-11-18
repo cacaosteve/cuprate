@@ -10,7 +10,7 @@ use cuprate_types::{TransactionVerificationData, TxVersion};
 use crate::{
     error::TxPoolError,
     txpool::TxpoolDatabase,
-    types::{TransactionHash, TransactionInfo, TxStateFlags},
+    types::{TransactionHash, TransactionInfo},
 };
 
 /// Gets the [`TransactionVerificationData`] of a transaction in the tx-pool, leaving the tx in the pool.
@@ -36,7 +36,7 @@ pub fn get_transaction_verification_data(
     Ok(TransactionVerificationData {
         version: TxVersion::from_raw(tx.version()).expect("Tx in tx-pool has invalid version"),
         tx,
-        tx_blob,
+        tx_blob: tx_blob.into(),
         tx_weight: tx_info.weight,
         fee: tx_info.fee,
         tx_hash: *tx_hash,
@@ -59,5 +59,5 @@ pub fn in_stem_pool(
 
     let tx_info: TransactionInfo = bytemuck::pod_read_unaligned(tx_info.as_ref());
 
-    Ok(tx_info.flags.contains(TxStateFlags::STATE_STEM))
+    Ok(tx_info.flags.private())
 }

@@ -14,7 +14,7 @@ The version can be 1 or 2 up to hard-fork 12 then it must be 2[^weird-version-ru
 
 ### Input
 
-The transaction must only have one input and it must be of type `txin_gen`[^input-type].
+The transaction must only have one input, and it must be of type `txin_gen`[^input-type].
 
 The height specified in the input must be the actual block height[^input-height].
 
@@ -37,7 +37,7 @@ in [this](https://github.com/monero-project/monero/blob/67d190ce7c33602b6a3b804f
 
 The [reward from the block](./reward.md#calculating-block-reward) + the total fees must not be more than the summed output amount[^total-output-amount].
 
-For hard-fork 1 and from 12 onwards the summed output amount must equal the reward + fees[^exact-output-amount] this means from 2 till 11 miners can collect
+For hard-fork 1 and from 13 onwards the summed output amount must equal the reward + fees[^exact-output-amount] this means from 2 till 12 miners can collect
 less if they want less dust.
 
 ### Output Type

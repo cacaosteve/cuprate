@@ -101,6 +101,7 @@ ignore = [
 # [possible values: any SPDX 3.11 short identifier (+ optional exception)].
 allow = [
     # Nothing required - free to use without permission.
+    "0BSD",    # https://spdx.org/licenses/0BSD.html
     "CC0-1.0", # https://creativecommons.org/publicdomain/zero/1.0/
     "Unlicense",
 
@@ -140,7 +141,7 @@ confidence-threshold = 0.8
 # aren't accepted for every possible crate as with the normal allow list
 exceptions = [
     # Cuprate (AGPL-3.0-only)
-    { allow = ["AGPL-3.0-only"], name = "cuprated", version = "*" }
+    { allow = ["AGPL-3.0-only"], name = "cuprated" }
 
     # Each entry is the crate and version constraint, and its specific allow
     # list

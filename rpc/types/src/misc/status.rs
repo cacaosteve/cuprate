@@ -1,7 +1,7 @@
 //! RPC response status type.
 
 //---------------------------------------------------------------------------------------------------- Import
-use std::fmt::Display;
+use std::{borrow::Cow, fmt::Display};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -109,7 +109,7 @@ pub enum Status {
     /// This exists to act as a catch-all for all of
     /// `monerod`'s other strings it puts in the `status` field.
     #[cfg_attr(feature = "serde", serde(rename = "OTHER"), serde(untagged))]
-    Other(String),
+    Other(Cow<'static, str>),
 }
 
 impl From<String> for Status {
@@ -120,7 +120,7 @@ impl From<String> for Status {
             CORE_RPC_STATUS_NOT_MINING => Self::NotMining,
             CORE_RPC_STATUS_PAYMENT_REQUIRED => Self::PaymentRequired,
             CORE_RPC_STATUS_FAILED => Self::Failed,
-            _ => Self::Other(s),
+            _ => Self::Other(Cow::Owned(s)),
         }
     }
 }
@@ -154,8 +154,12 @@ impl Display for Status {
 impl EpeeValue for Status {
     const MARKER: Marker = <String as EpeeValue>::MARKER;
 
-    fn read<B: Buf>(r: &mut B, marker: &Marker) -> cuprate_epee_encoding::Result<Self> {
-        let string = <String as EpeeValue>::read(r, marker)?;
+    fn read<B: Buf>(
+        r: &mut B,
+        marker: &Marker,
+        limits: cuprate_epee_encoding::EpeeValueLimits,
+    ) -> cuprate_epee_encoding::Result<Self> {
+        let string = <String as EpeeValue>::read(r, marker, limits)?;
         Ok(Self::from(string))
     }
 
@@ -165,7 +169,7 @@ impl EpeeValue for Status {
 
     fn epee_default_value() -> Option<Self> {
         // <https://github.com/Cuprate/cuprate/pull/147#discussion_r1654992559>
-        Some(Self::Other(String::new()))
+        Some(Self::Other(Cow::Borrowed("")))
     }
 
     fn write<B: BufMut>(self, w: &mut B) -> cuprate_epee_encoding::Result<()> {
@@ -187,14 +191,17 @@ mod test {
             Status::Busy,
             Status::NotMining,
             Status::PaymentRequired,
-            Status::Other(String::new()),
+            Status::Other(Cow::Borrowed("")),
         ] {
             let mut buf = vec![];
 
             <Status as EpeeValue>::write(status.clone(), &mut buf).unwrap();
-            let status2 =
-                <Status as EpeeValue>::read(&mut buf.as_slice(), &<Status as EpeeValue>::MARKER)
-                    .unwrap();
+            let status2 = <Status as EpeeValue>::read(
+                &mut buf.as_slice(),
+                &<Status as EpeeValue>::MARKER,
+                Default::default(),
+            )
+            .unwrap();
 
             assert_eq!(status, status2);
         }

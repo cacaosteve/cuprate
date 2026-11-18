@@ -1,34 +1,21 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
-use futures::StreamExt;
-use monero_oxide::block::Block;
-use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit};
-use tower::{BoxError, Service, ServiceExt};
-use tracing::error;
+use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, RwLock};
+use tokio_util::sync::CancellationToken;
+use tower::BoxError;
 
-use cuprate_blockchain::service::{BlockchainReadHandle, BlockchainWriteHandle};
-use cuprate_consensus::{
-    BlockChainContextRequest, BlockChainContextResponse, BlockchainContextService,
-    ExtendedConsensusError,
-};
-use cuprate_p2p::{
-    block_downloader::{BlockBatch, BlockDownloaderConfig},
-    BroadcastSvc, NetworkInterface,
-};
+use cuprate_blockchain::service::BlockchainWriteHandle;
+use cuprate_consensus::BlockchainContextService;
+use cuprate_p2p::{block_downloader::BlockBatch, BroadcastSvc, NetworkInterface};
 use cuprate_p2p_core::ClearNet;
-use cuprate_txpool::service::TxpoolWriteHandle;
-use cuprate_types::{
-    blockchain::{BlockchainReadRequest, BlockchainResponse},
-    Chain, TransactionVerificationData,
-};
 
 use crate::{
     blockchain::{
-        chain_service::ChainService, interface::COMMAND_TX, syncer,
-        types::ConsensusBlockchainReadHandle,
+        chain_service::ChainService, syncer::BlockchainSyncer, types::ConsensusBlockchainReadHandle,
     },
-    constants::PANIC_CRITICAL_SERVICE_ERROR,
+    monitor::FatalError,
     txpool::TxpoolManagerHandle,
+    LaunchContext,
 };
 
 mod commands;
@@ -37,52 +24,67 @@ mod handler;
 #[cfg(test)]
 mod tests;
 
-pub use commands::{BlockchainManagerCommand, IncomingBlockOk};
-use syncer::SyncerHandle;
+pub(crate) use commands::{BlockchainManagerCommand, IncomingBlockOk};
 
 /// Initialize the blockchain manager.
 ///
-/// This function sets up the [`BlockchainManager`] and the [`syncer`] so that the functions in [`interface`](super::interface)
+/// This function sets up the `BlockchainManager` and the [`BlockchainSyncer`] so that the functions in [`interface`](super::interface)
 /// can be called.
-pub async fn init_blockchain_manager(
+pub(crate) async fn init_blockchain_manager(
+    launch_ctx: &LaunchContext,
     clearnet_interface: NetworkInterface<ClearNet>,
     blockchain_write_handle: BlockchainWriteHandle,
-    blockchain_read_handle: BlockchainReadHandle,
     txpool_manager_handle: TxpoolManagerHandle,
-    mut blockchain_context_service: BlockchainContextService,
-    block_downloader_config: BlockDownloaderConfig,
-    syncer_handle: SyncerHandle,
-) {
+    synced_tx: futures::channel::oneshot::Sender<()>,
+    command_rx: mpsc::Receiver<BlockchainManagerCommand>,
+) -> Result<(), anyhow::Error> {
+    let block_downloader_config = launch_ctx.config.block_downloader_config();
+    let shutdown_token = launch_ctx.task_executor.cancellation_token();
+
     // TODO: find good values for these size limits
     let (batch_tx, batch_rx) = mpsc::channel(1);
     let stop_current_block_downloader = Arc::new(Notify::new());
-    let (command_tx, command_rx) = mpsc::channel(3);
+    let fast_sync_hashes = launch_ctx.config.fast_sync_hashes();
 
-    COMMAND_TX.set(command_tx).unwrap();
+    let syncer = BlockchainSyncer::new(
+        &launch_ctx.blockchain.syncer(),
+        synced_tx,
+        launch_ctx.config.offline,
+    );
 
-    tokio::spawn(syncer::syncer(
-        blockchain_context_service.clone(),
-        ChainService(blockchain_read_handle.clone()),
-        clearnet_interface.clone(),
-        batch_tx,
-        Arc::clone(&stop_current_block_downloader),
-        block_downloader_config,
-        syncer_handle,
-    ));
+    launch_ctx.task_executor.spawn_critical(
+        "blockchain syncer",
+        syncer.run(
+            launch_ctx.blockchain.context_svc(),
+            ChainService(launch_ctx.blockchain.read(), fast_sync_hashes),
+            clearnet_interface.clone(),
+            batch_tx,
+            Arc::clone(&stop_current_block_downloader),
+            block_downloader_config,
+            shutdown_token.clone(),
+        ),
+    );
 
     let manager = BlockchainManager {
         blockchain_write_handle,
         blockchain_read_handle: ConsensusBlockchainReadHandle::new(
-            blockchain_read_handle,
+            launch_ctx.blockchain.read(),
             BoxError::from,
         ),
         txpool_manager_handle,
-        blockchain_context_service,
+        blockchain_context_service: launch_ctx.blockchain.context_svc(),
         stop_current_block_downloader,
         broadcast_svc: clearnet_interface.broadcast_svc(),
+        reorg_lock: Arc::clone(&launch_ctx.reorg_lock),
+        fast_sync_hashes,
     };
 
-    tokio::spawn(manager.run(batch_rx, command_rx));
+    launch_ctx.task_executor.spawn_critical(
+        "blockchain manager",
+        manager.run(batch_rx, command_rx, shutdown_token),
+    );
+
+    Ok(())
 }
 
 /// The blockchain manager.
@@ -91,7 +93,7 @@ pub async fn init_blockchain_manager(
 /// go through this.
 ///
 /// Other parts of Cuprate can interface with this by using the functions in [`interface`](super::interface).
-pub struct BlockchainManager {
+struct BlockchainManager {
     /// The [`BlockchainWriteHandle`], this is the _only_ part of Cuprate where a [`BlockchainWriteHandle`]
     /// is held.
     blockchain_write_handle: BlockchainWriteHandle,
@@ -102,36 +104,43 @@ pub struct BlockchainManager {
     /// The blockchain context cache, this caches the current state of the blockchain to quickly calculate/retrieve
     /// values without needing to go to a [`BlockchainReadHandle`].
     blockchain_context_service: BlockchainContextService,
-    /// A [`Notify`] to tell the [`syncer`](syncer::syncer) that we want to cancel this current download
+    /// A [`Notify`] to tell the [`BlockchainSyncer`] that we want to cancel this current download
     /// attempt.
     stop_current_block_downloader: Arc<Notify>,
     /// The broadcast service, to broadcast new blocks.
     broadcast_svc: BroadcastSvc<ClearNet>,
+    /// Reorg lock.
+    reorg_lock: Arc<RwLock<()>>,
+    /// Fast-sync hashes for this node's network.
+    fast_sync_hashes: &'static [[u8; 32]],
 }
 
 impl BlockchainManager {
     /// The [`BlockchainManager`] task.
-    pub async fn run(
+    pub(crate) async fn run(
         mut self,
         mut block_batch_rx: mpsc::Receiver<(BlockBatch, Arc<OwnedSemaphorePermit>)>,
         mut command_rx: mpsc::Receiver<BlockchainManagerCommand>,
-    ) {
+        shutdown_token: CancellationToken,
+    ) -> Result<(), FatalError> {
         loop {
             tokio::select! {
+                biased;
+                () = shutdown_token.cancelled() => {
+                    break;
+                }
                 Some((batch, permit)) = block_batch_rx.recv() => {
-                    self.handle_incoming_block_batch(
-                        batch,
-                    ).await;
+                    self.handle_incoming_block_batch(batch).await?;
 
                     drop(permit);
                 }
                 Some(incoming_command) = command_rx.recv() => {
-                    self.handle_command(incoming_command).await;
-                }
-                else => {
-                    todo!("TODO: exit the BC manager")
+                    self.handle_command(incoming_command).await?;
                 }
             }
         }
+
+        tracing::info!("Blockchain manager shut down.");
+        Ok(())
     }
 }

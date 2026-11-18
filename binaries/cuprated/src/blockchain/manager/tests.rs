@@ -1,11 +1,11 @@
-use std::{collections::HashMap, env::temp_dir, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use monero_oxide::{
     block::{Block, BlockHeader},
-    io::CompressedPoint,
+    ed25519::CompressedPoint,
     transaction::{Input, Output, Timelock, Transaction, TransactionPrefix},
 };
-use tokio::sync::{oneshot, watch};
+use tokio::sync::oneshot;
 use tower::BoxError;
 
 use cuprate_blockchain::config::Config;
@@ -42,19 +42,18 @@ async fn mock_manager(data_dir: PathBuf) -> BlockchainManager {
             Arc::clone(&thread_pool),
         )
         .unwrap();
-    let (txpool_read_handle, txpool_write_handle) =
-        cuprate_txpool::service::init_with_pool(fjall, thread_pool).unwrap();
 
     check_add_genesis(
         &mut blockchain_read_handle,
         &mut blockchain_write_handle,
         Network::Mainnet,
     )
-    .await;
+    .await
+    .unwrap();
 
     let mut context_config = ContextConfig::main_net();
     context_config.difficulty_cfg.fixed_difficulty = Some(1);
-    context_config.hard_fork_cfg.info = HFsInfo::new([HFInfo::new(0, 0); 16]);
+    context_config.hard_fork_cfg.info = HFsInfo::new([HFInfo::new(0, 0, 0); 16]);
 
     let blockchain_read_handle =
         ConsensusBlockchainReadHandle::new(blockchain_read_handle, BoxError::from);
@@ -73,6 +72,8 @@ async fn mock_manager(data_dir: PathBuf) -> BlockchainManager {
         blockchain_context_service,
         stop_current_block_downloader: Arc::new(Default::default()),
         broadcast_svc: BroadcastSvc::mock(),
+        reorg_lock: Arc::new(Default::default()),
+        fast_sync_hashes: &[],
     }
 }
 
@@ -97,7 +98,7 @@ fn generate_block(context: &BlockchainContext) -> Block {
                         context.already_generated_coins,
                         context.current_hf,
                     )),
-                    key: CompressedPoint([0; 32]),
+                    key: CompressedPoint::from([0; 32]),
                     view_tag: Some(1),
                 }],
                 extra: rand::random::<[u8; 32]>().to_vec(),
@@ -127,7 +128,8 @@ async fn simple_reorg() {
             prepped_txs: HashMap::new(),
             response_tx: oneshot::channel().0,
         })
-        .await;
+        .await
+        .unwrap();
 
     manager_2
         .handle_command(BlockchainManagerCommand::AddBlock {
@@ -135,7 +137,8 @@ async fn simple_reorg() {
             prepped_txs: HashMap::new(),
             response_tx: oneshot::channel().0,
         })
-        .await;
+        .await
+        .unwrap();
 
     assert_eq!(
         manager_1.blockchain_context_service.blockchain_context(),
@@ -152,7 +155,8 @@ async fn simple_reorg() {
             prepped_txs: HashMap::new(),
             response_tx: oneshot::channel().0,
         })
-        .await;
+        .await
+        .unwrap();
 
     manager_2
         .handle_command(BlockchainManagerCommand::AddBlock {
@@ -160,7 +164,8 @@ async fn simple_reorg() {
             prepped_txs: HashMap::new(),
             response_tx: oneshot::channel().0,
         })
-        .await;
+        .await
+        .unwrap();
 
     let manager_1_context = manager_1
         .blockchain_context_service
@@ -179,7 +184,8 @@ async fn simple_reorg() {
             prepped_txs: HashMap::new(),
             response_tx: oneshot::channel().0,
         })
-        .await;
+        .await
+        .unwrap();
     // make sure this didn't change the context
     assert_eq!(
         &manager_1_context,
@@ -195,7 +201,8 @@ async fn simple_reorg() {
             prepped_txs: HashMap::new(),
             response_tx: oneshot::channel().0,
         })
-        .await;
+        .await
+        .unwrap();
 
     manager_2
         .handle_command(BlockchainManagerCommand::AddBlock {
@@ -203,7 +210,8 @@ async fn simple_reorg() {
             prepped_txs: HashMap::new(),
             response_tx: oneshot::channel().0,
         })
-        .await;
+        .await
+        .unwrap();
 
     // make sure manager 1 reorged.
     assert_eq!(
@@ -222,8 +230,6 @@ async fn simple_reorg() {
 /// Same as [`simple_reorg`] but uses block batches instead.
 #[tokio::test]
 async fn simple_reorg_block_batch() {
-    cuprate_fast_sync::set_fast_sync_hashes(&[]);
-
     let handle = HandleBuilder::new().build();
 
     // create 2 managers
@@ -242,7 +248,8 @@ async fn simple_reorg_block_batch() {
             size: 0,
             peer_handle: handle.1.clone(),
         })
-        .await;
+        .await
+        .unwrap();
 
     manager_2
         .handle_incoming_block_batch(BlockBatch {
@@ -250,7 +257,8 @@ async fn simple_reorg_block_batch() {
             size: 0,
             peer_handle: handle.1.clone(),
         })
-        .await;
+        .await
+        .unwrap();
 
     assert_eq!(
         manager_1.blockchain_context_service.blockchain_context(),
@@ -267,7 +275,8 @@ async fn simple_reorg_block_batch() {
             size: 0,
             peer_handle: handle.1.clone(),
         })
-        .await;
+        .await
+        .unwrap();
 
     manager_2
         .handle_incoming_block_batch(BlockBatch {
@@ -275,7 +284,8 @@ async fn simple_reorg_block_batch() {
             size: 0,
             peer_handle: handle.1.clone(),
         })
-        .await;
+        .await
+        .unwrap();
 
     let manager_1_context = manager_1
         .blockchain_context_service
@@ -294,7 +304,8 @@ async fn simple_reorg_block_batch() {
             size: 0,
             peer_handle: handle.1.clone(),
         })
-        .await;
+        .await
+        .unwrap();
     // make sure this didn't change the context
     assert_eq!(
         &manager_1_context,
@@ -310,7 +321,8 @@ async fn simple_reorg_block_batch() {
             size: 0,
             peer_handle: handle.1.clone(),
         })
-        .await;
+        .await
+        .unwrap();
 
     manager_2
         .handle_incoming_block_batch(BlockBatch {
@@ -318,7 +330,8 @@ async fn simple_reorg_block_batch() {
             size: 0,
             peer_handle: handle.1.clone(),
         })
-        .await;
+        .await
+        .unwrap();
 
     // make sure manager 1 reorged.
     assert_eq!(
@@ -353,14 +366,15 @@ async fn recover_bad_reorg() {
             prepped_txs: HashMap::new(),
             response_tx: oneshot::channel().0,
         })
-        .await;
+        .await
+        .unwrap();
 
     let context_2 = manager_1
         .blockchain_context_service
         .blockchain_context()
         .clone();
 
-    let mut block_2 = generate_block(&context_2);
+    let block_2 = generate_block(&context_2);
 
     manager_1
         .handle_command(BlockchainManagerCommand::AddBlock {
@@ -368,7 +382,8 @@ async fn recover_bad_reorg() {
             prepped_txs: HashMap::new(),
             response_tx: oneshot::channel().0,
         })
-        .await;
+        .await
+        .unwrap();
 
     // Save this context for later to check the reorg gets reversed correctly.
     let context = manager_1
@@ -377,7 +392,7 @@ async fn recover_bad_reorg() {
         .clone();
 
     // start building the alt chain.
-    let mut block_1_alt = generate_block(&context_1);
+    let block_1_alt = generate_block(&context_1);
 
     manager_1
         .handle_command(BlockchainManagerCommand::AddBlock {
@@ -385,7 +400,8 @@ async fn recover_bad_reorg() {
             prepped_txs: HashMap::new(),
             response_tx: oneshot::channel().0,
         })
-        .await;
+        .await
+        .unwrap();
 
     // This tx is invalid and will make the reorg fail.
     let tx = Transaction::V2 {
@@ -400,7 +416,7 @@ async fn recover_bad_reorg() {
 
     let tx = TransactionVerificationData {
         version: TxVersion::RingSignatures,
-        tx_blob: tx.serialize(),
+        tx_blob: tx.serialize().into(),
         tx_weight: 0,
         fee: 0,
         tx_hash: tx.hash(),
@@ -418,7 +434,8 @@ async fn recover_bad_reorg() {
             prepped_txs: HashMap::from([(tx.tx_hash, tx)]),
             response_tx: oneshot::channel().0,
         })
-        .await;
+        .await
+        .unwrap();
 
     let mut block_3_alt = generate_block(manager_1.blockchain_context_service.blockchain_context());
     block_3_alt.header.previous = block_2_alt.hash();
@@ -434,7 +451,8 @@ async fn recover_bad_reorg() {
             prepped_txs: HashMap::new(),
             response_tx: oneshot::channel().0,
         })
-        .await;
+        .await
+        .unwrap();
 
     // make sure the reorg failed.
     assert_eq!(

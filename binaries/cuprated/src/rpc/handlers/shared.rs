@@ -4,26 +4,18 @@
 //! Some handlers have `todo!()`s for other Cuprate internals that must be completed, see:
 //! <https://github.com/Cuprate/cuprate/pull/355>
 
-use std::{
-    collections::{HashMap, HashSet},
-    num::NonZero,
-};
+use std::num::NonZero;
 
 use anyhow::{anyhow, Error};
-use cuprate_types::OutputDistributionInput;
-use monero_oxide::transaction::Timelock;
+use cuprate_types::PreRctOutputDistributionInput;
 
 use cuprate_constants::rpc::MAX_RESTRICTED_GLOBAL_FAKE_OUTS_COUNT;
 use cuprate_helper::cast::usize_to_u64;
-use cuprate_hex::Hex;
 use cuprate_rpc_interface::RpcHandler;
 use cuprate_rpc_types::{
-    bin::{
-        GetOutsRequest, GetOutsResponse, GetTransactionPoolHashesRequest,
-        GetTransactionPoolHashesResponse,
-    },
+    bin::{GetOutsRequest, GetOutsResponse},
     json::{GetOutputDistributionRequest, GetOutputDistributionResponse},
-    misc::{Distribution, OutKeyBin},
+    misc::{Distribution, DistributionCompressedBinary, DistributionUncompressed, OutKeyBin},
 };
 
 use crate::rpc::{
@@ -57,8 +49,8 @@ pub(super) async fn get_outs(
     for (_, index_vec) in outputs {
         for (_, out) in index_vec {
             let out_key = OutKeyBin {
-                key: out.key.0,
-                mask: out.commitment.0,
+                key: out.key.to_bytes(),
+                mask: out.commitment.to_bytes(),
                 unlocked: cuprate_consensus_rules::transactions::output_unlocked(
                     &out.time_lock,
                     blockchain_ctx.chain_height,
@@ -110,22 +102,84 @@ pub(super) async fn get_output_distribution(
         ));
     }
 
-    let input = OutputDistributionInput {
-        amounts: request.amounts,
-        cumulative: request.cumulative,
-        from_height: request.from_height,
+    // Pre-RCT amounts are served by the database, the RCT
+    // distribution by the context service's cache.
+    let pre_rct_amounts: Vec<NonZero<u64>> = request
+        .amounts
+        .iter()
+        .copied()
+        .filter_map(NonZero::new)
+        .collect();
 
-        // 0 / `None` is placeholder for the whole chain
-        to_height: NonZero::new(request.to_height),
+    // 0 / `None` is placeholder for the whole chain.
+    let to_height = match NonZero::new(request.to_height) {
+        Some(h) => Some(h),
+        None if pre_rct_amounts.is_empty() => None,
+        None => NonZero::new(blockchain::chain_height(&mut state.blockchain_read).await? - 1),
     };
 
-    let distributions = blockchain::output_distribution(&mut state.blockchain_read, input).await?;
+    let mut pre_rct = if pre_rct_amounts.is_empty() {
+        Vec::new()
+    } else {
+        blockchain::pre_rct_output_distribution(
+            &mut state.blockchain_read,
+            PreRctOutputDistributionInput {
+                amounts: pre_rct_amounts,
+                cumulative: request.cumulative,
+                from_height: request.from_height,
+                to_height,
+            },
+        )
+        .await?
+    }
+    .into_iter();
+
+    let mut distributions = Vec::with_capacity(request.amounts.len());
+    for &amount in &request.amounts {
+        let data = if amount == 0 {
+            blockchain_context::rct_output_distribution(
+                &mut state.blockchain_context,
+                request.from_height,
+                to_height,
+                request.cumulative,
+            )
+            .await?
+        } else {
+            pre_rct.next().expect("one distribution per pre-RCT amount")
+        };
+
+        distributions.push(data);
+    }
+
+    // TODO: <https://github.com/monero-project/monero/issues/9422>.
+    let binary = request.binary;
+    let compress = request.compress;
+
+    let distributions = distributions
+        .into_iter()
+        .map(|data| {
+            if binary && compress {
+                Distribution::CompressedBinary(DistributionCompressedBinary {
+                    start_height: data.start_height,
+                    base: data.base,
+                    distribution: data.distribution,
+                    amount: data.amount,
+                })
+            } else {
+                Distribution::Uncompressed(DistributionUncompressed {
+                    start_height: data.start_height,
+                    base: data.base,
+                    distribution: data.distribution,
+                    amount: data.amount,
+                    binary,
+                })
+            }
+        })
+        .collect();
 
     Ok(GetOutputDistributionResponse {
         base: helper::access_response_base(false),
-        distributions: todo!(
-            "This type contains binary strings: <https://github.com/monero-project/monero/issues/9422>"
-        ),
+        distributions,
     })
 }
 

@@ -3,7 +3,7 @@
 
 [Cuprate](https://github.com/Cuprate/cuprate) is an alternative and independent [Monero](https://getmonero.org) node implementation that is focused on being fast, user-friendly, and backwards compatible with [`monerod`](https://github.com/monero-project/monero).
 
-This project is currently a work-in-progress; the `cuprated` node can be ran by users although it is not yet ready for production. This book contains brief sections documenting `cuprated` usage, however, be aware that it is **incomplete** and missing sections.
+This project is currently a work-in-progress; the `cuprated` node can be ran by users, although it is not yet ready for production. This book contains brief sections documenting `cuprated` usage, however, be aware that it is **incomplete** and missing sections.
 
 To get started, see: [`Getting started`](./getting-started/intro.md).
 
@@ -17,7 +17,12 @@ Frequently asked questions about Cuprate.
 ## Who?
 Cuprate was started by [SyntheticBird45](https://github.com/SyntheticBird45) in [early 2023](https://github.com/Cuprate/cuprate/commit/2c7cb27548c727550ce4684cb31d0eafcf852c8e) and was later joined by [boog900](https://github.com/boog900), [hinto-janai](https://github.com/hinto-janai), and [other contributors](https://github.com/Cuprate/cuprate/graphs/contributors).
 
-A few Cuprate contributors are funded by Monero's [Community Crowdfunding System](https://ccs.getmonero.org) to work on Cuprate and occasionally `monerod`.
+Cuprate contributors are funded by Monero's [Community Crowdfunding System](https://ccs.getmonero.org) to work on Cuprate and occasionally `monerod`.
+
+## Why `Cuprate` and how do releases get their names?
+Cuprate gets it's name from Cuprate high-temperature superconductors[1](https://en.wikipedia.org/wiki/Cuprate_superconductor) which are a family of high-temperature superconducting materials made of layers of copper oxides (CuO2) alternating with layers of other metal oxides.
+
+Cuprate releases are named after metals or metallic minerals and the metal theme is due to the program being written in the Rust programming language.[2](https://github.com/cuprate/cuprate/issues/3)
 
 ## What is `cuprated`?
 `monerod` is the [daemon](https://en.wikipedia.org/wiki/Daemon_(computing)) of the Monero project, the Monero node.
@@ -55,11 +60,9 @@ Cuprate's node (`cuprated`) can currently:
 - Respond to certain [daemon RPC](https://www.getmonero.org/resources/developer-guides/daemon-rpc.html) requests
 
 ## How fast does `cuprated` sync?
-The current full verification sync timings are around ~7.5x faster than `monerod`.
+The current full verification sync timings can be up to ~10x faster than `monerod`.
 
-In real terms, 16 hour full verification syncs and 4 hour fast-sync syncs have been reported on consumer grade hardware. On faster hardware (14 threads, 10Gbps networking), sub 2 hour fast-syncs have been reported.
-
-Various testing results can be found [here](https://github.com/Cuprate/cuprate/issues/195).
+In real terms, 15 hour full verification syncs and ~1 hour `fast-sync` syncs have been reported on consumer hardware.
 
 ## How to see status of `cuprated`?
 In the terminal running `cuprated`, type `status`.
@@ -76,23 +79,16 @@ It also logs its block height status when syncing, for example:
 ```
 
 ## How big is the database?
-As of May 1st 2025, `cuprated`'s database is ~270GB in size.
-
-`monerod`'s database is ~225GB in size.
-
-This is 1.2x larger.
-
-There is [on-going](https://github.com/Cuprate/cuprate/pull/564) [work](https://github.com/Cuprate/cuprate/pull/566) that will allow `cuprated` to use noticeably less disk space than `monerod`.
+As of April 14th 2026, `cuprated` uses noticeably less disk space than `monerod` (~202GB vs ~292GB).
 
 ## Is the database compatible with `monerod`?
 No.
 
-The database `cuprated` generates and uses cannot directly be used by `monerod` and vice-versa. Supporting this is possible but there are no current plans to do so.
+The database `cuprated` generates and uses cannot directly be used by `monerod` and vice versa. Supporting this is possible but there are no current plans to do so.
 
 ## Can I connect a wallet to `cuprated`?
-Soon.
 
-Wallets require the [daemon RPC API](https://docs.getmonero.org/rpc-library/monerod-rpc). This is actively being worked on to be backwards compatible with `monerod`, see the [RPC section](rpc.md) for more information.
+Yes, although some niche wallet functions may not work. Remember Cuprate is not yet ready for critical real world use cases.
 
 ## Can `cuprated` be used with an anonymity network like Tor?
 Yes.
@@ -100,16 +96,8 @@ Yes.
 Tor and [`arti`](https://arti.torproject.org) support have been integrated into `cuprated`. See [config](./config.md) for configuration options.
 
 ## What is the versioning scheme?
-`cuprated` is currently in alpha (`0.0.x`).
+`cuprated` is currently moving to beta (`0.x.y`).
 
-After sufficient testing and development, `cuprated` will enter beta (`0.x.y`) then stable (`x.y.z`) releases.
+After sufficient testing and development, `cuprated` will enter stable (`x.y.z`) releases.
 
 See [this GitHub issue](https://github.com/Cuprate/cuprate/issues/374) for more details.
-
-## What is the current progress?
-See [this Reddit thread](https://www.reddit.com/r/Monero/comments/1ij2sw6/cuprate_2024_progress_report) for a brief report on Cuprate's progress throughout 2024.
-
-Things are always changing so feel free to join our [Matrix channel](https://matrix.to/#/#cuprate:monero.social) and ask questions.
-
-## What is the current roadmap?
-See [this GitHub issue](https://github.com/Cuprate/cuprate/issues/376) for Cuprate's rough 2025 roadmap.

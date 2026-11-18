@@ -23,7 +23,7 @@
 //! impl EpeeObjectBuilder<Test> for __TestEpeeBuilder {
 //!     fn add_field<B: Buf>(&mut self, name: &str, r: &mut B) -> cuprate_epee_encoding::error::Result<bool> {
 //!         match name {
-//!             "val" => {self.val = Some(read_epee_value(r)?);}
+//!             "val" => {self.val = Some(read_epee_value(r, Default::default())?);}
 //!             _ => return Ok(false),
 //!         }
 //!         Ok(true)
@@ -80,7 +80,7 @@ mod varint;
 pub use error::*;
 use io::*;
 pub use marker::{InnerMarker, Marker};
-pub use value::EpeeValue;
+pub use value::{EpeeValue, EpeeValueLimits};
 pub use varint::{read_varint, write_varint};
 
 /// Header that needs to be at the beginning of every binary blob that follows
@@ -156,6 +156,10 @@ fn read_head_object<T: EpeeObject, B: Buf>(r: &mut B) -> Result<T> {
 fn read_field_name_bytes<B: Buf>(r: &mut B) -> Result<Bytes> {
     let len: usize = checked_read_primitive(r, Buf::get_u8)?.into();
 
+    if len == 0 {
+        return Err(Error::Format("Field name has a length of 0"));
+    }
+
     checked_read(r, |b: &mut B| b.copy_to_bytes(len), len)
 }
 
@@ -204,9 +208,9 @@ pub fn read_marker<B: Buf>(r: &mut B) -> Result<Marker> {
 
 /// Read an epee value from the stream, an epee value is the part after the key
 /// including the marker.
-pub fn read_epee_value<T: EpeeValue, B: Buf>(r: &mut B) -> Result<T> {
+pub fn read_epee_value<T: EpeeValue, B: Buf>(r: &mut B, limits: EpeeValueLimits) -> Result<T> {
     let marker = read_marker(r)?;
-    T::read(r, &marker)
+    T::read(r, &marker, limits)
 }
 
 /// Write an epee value to the stream, an epee value is the part after the key

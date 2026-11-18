@@ -1,9 +1,6 @@
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
-use cuprate_blockchain::config::CacheSizes;
-use cuprate_helper::fs::CUPRATE_DATA_DIR;
+use cuprate_blockchain::config::{CacheSizes, Persistence};
 
 use super::{default::DefaultOrCustom, macros::config_struct};
 
@@ -80,6 +77,31 @@ config_struct! {
     #[derive(Default, Debug, Deserialize, Serialize, PartialEq, Eq)]
     #[serde(deny_unknown_fields, default)]
     pub struct BlockchainConfig {
+        /// Whether to prune the blockchain. This reduces the size of the blockchain by removing most transaction proof data.
+        /// Note that once a node is pruned it cannot be un-pruned.
+        ///
+        /// Defaults to `false`.
+        pub prune: bool,
+        #[comment_out = true]
+        /// The persistence mode of the database.
+        ///
+        /// ## Buffer
+        /// Buffer the changes but don't wait for them to be synced to disk.
+        /// This can lead to corruption if there is a crash.
+        ///
+        /// ## Sync
+        /// Sync all changes to disk.
+        /// This prevents corruption but can be a bit slower.
+        ///
+        /// ## BufferThenSync
+        /// Buffer changes while syncing but then switch to syncing all changes to disk once synced.
+        /// This is a compromise between Buffer and Sync.
+        ///
+        /// Type         | String
+        /// Valid values | "Buffer", "Sync", "BufferThenSync"
+        /// Examples     | "BufferThenSync"
+        pub persistence: Persistence,
+
         #[inline = true]
         #[comment_out = true]
         /// The size of each tape cache.

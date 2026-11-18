@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 env:
@@ -15,17 +15,17 @@ env:
   # Increase thread stack size to 8 megabytes.
   RUST_MIN_STACK: 8000000
   # Fail on documentation warnings.
-  RUSTDOCFLAGS: '-D warnings'
+  RUSTDOCFLAGS: "-D warnings"
   # Enable debug information generation for build dependencies.
   CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: true
   # Build commands.
   CMD_DOC: cargo doc --all-features --no-deps
   CMD_CLIPPY: cargo clippy --all-features --all-targets -- -D warnings
-  CMD_TEST: cargo test --all-features
+  CMD_NEXTEST: |
+    cargo nextest run --all-features --profile ci
+    cargo test --doc --all-features
   CMD_BUILD: cargo build --all-features --all-targets
-  CMD_HACK: |
-    cargo install cargo-hack --locked
-    cargo hack check --feature-powerset --no-dev-deps
+  CMD_HACK: cargo hack check --each-feature --no-dev-deps
 
 jobs:
   # Run format separately.
@@ -35,7 +35,7 @@ jobs:
   # `cargo fmt` checks _all_ code, regardless of the OS
   # or any `#[cfg]`'s, so this only needs to run on Linux.
   fmt:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,26 +50,22 @@ jobs:
   # Run typo checker separately.
   # This will fast-cancel other CI early if this fails.
   typo:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-    - name: Spell Check
-      uses: crate-ci/typos@master
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Spell Check
+        uses: crate-ci/typos@master
 
   # Run 32-bit WASM support check separately.
   wasm-32-bit-support:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
 
     strategy:
       matrix:
         # The list of crates to check for WASM 32 bit support
         #  TODO: check features.
-        crate: [
-            cuprate-epee-encoding,
-            cuprate-rpc-types,
-            cuprate-fixed-bytes,
-        ]
+        crate: [cuprate-epee-encoding, cuprate-rpc-types, cuprate-fixed-bytes]
 
     steps:
       - name: Checkout
@@ -86,18 +82,45 @@ jobs:
       - name: Build WASM 32-bit
         run: cargo build --target wasm32-unknown-unknown --features __not_public_32_bit -p ${{ matrix.crate }}
 
+  feature-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rustcache-feature-check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+
+      - name: Feature Check
+        run: ${{ env.CMD_HACK }}
+
   # CI, runs on GitHub provided OSs.
   ci:
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os.runner }}
 
     strategy:
       matrix:
         os: [
-            windows-2022, # EOL = 2026-10-13 | <https://endoflife.date/windows-server>
-            macos-15,     # EOL = 2027-09-16 | <https://endoflife.date/macos>
-            ubuntu-22.04, # EOL = 2027-04-01 | <https://endoflife.date/ubuntu>
-            ubuntu-22.04-arm,
-        ]
+            { runner: windows-2022, name: windows, architecture: x86_64 }, # EOL = 2026-10-13 | <https://endoflife.date/windows-server>
+            { runner: macos-15, name: macos, architecture: aarch64 }, # EOL = 2027-09-16 | <https://endoflife.date/macos>
+            { runner: ubuntu-24.04, name: linux, architecture: x86_64 }, # EOL = 2029-05-31 | <https://endoflife.date/ubuntu>
+            { runner: ubuntu-24.04-arm, name: linux, architecture: aarch64 },
+          ]
 
     steps:
       - name: Checkout
@@ -112,17 +135,25 @@ jobs:
           components: clippy
 
       - name: Cache
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: target
-          key: ${{ matrix.os }}
+          prefix-key: rustcache-ci-${{ matrix.os.runner }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Download monerod
         uses: ./.github/actions/monerod-download
+        with:
+          os: ${{ matrix.os.name }}
+          arch: ${{ matrix.os.architecture }}
 
       - name: Install dependencies (Windows)
-        if: matrix.os == 'windows-2022'
+        if: matrix.os.runner == 'windows-2022'
         uses: lukka/get-cmake@v3.31.6 # Needed for `randomx-rs`
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
 
       - name: Documentation
         run: ${{ env.CMD_DOC }}
@@ -131,13 +162,10 @@ jobs:
         run: ${{ env.CMD_CLIPPY }}
 
       - name: Test
-        run: ${{ env.CMD_TEST }}
+        run: ${{ env.CMD_NEXTEST }}
 
       - name: Build
         run: ${{ env.CMD_BUILD }}
-
-      - name: Hack Check
-        run: ${{ env.CMD_HACK }}
 
   # CI, runs in a Docker image.
   ci-docker:
@@ -148,23 +176,16 @@ jobs:
     strategy:
       matrix:
         os:
-        # TODO: support musl <https://github.com/Cuprate/cuprate/issues/336>
-        # - { image: alpine:latest, commands: "apk update && apk add alpine-sdk cmake curl bash" }
-        - { image: archlinux:latest, commands: "pacman -Syyu --noconfirm base-devel git cmake openssl" }
-        - { image: debian:stable, commands: "apt update && apt -y install build-essential curl cmake git pkg-config libssl-dev" }
-        - { image: fedora:latest, commands: "dnf install --assumeyes @development-tools gcc gcc-c++ cmake git openssl-devel perl-core" }
+          - { image: alpine:latest, commands: "apk update && apk add alpine-sdk cmake curl bash monero && ln -sf /usr/bin/monerod monerod" } # Alpine is a special case due to its musl libc
+          - { image: archlinux:latest, commands: "pacman -Syyu --noconfirm base-devel git cmake openssl" }
+          - { image: debian:stable, commands: "apt update && apt -y install build-essential curl cmake git pkg-config libssl-dev" }
+          - { image: fedora:latest, commands: "dnf install --assumeyes @development-tools gcc gcc-c++ cmake git openssl-devel perl-core" }
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           clean: false
-
-      - name: Cache
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ matrix.os.image }}
 
       - name: Dependencies
         run: ${{ matrix.os.commands }}
@@ -175,8 +196,23 @@ jobs:
           toolchain: stable
           components: clippy
 
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rustcache-ci-docker-${{ matrix.os.image }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       - name: Download monerod
+        if: matrix.os.image != 'alpine:latest'
         uses: ./.github/actions/monerod-download
+        with:
+          os: linux
+          arch: x86_64
 
       - name: Documentation
         run: ${{ env.CMD_DOC }}
@@ -185,10 +221,138 @@ jobs:
         run: ${{ env.CMD_CLIPPY }}
 
       - name: Test
-        run: ${{ env.CMD_TEST }}
+        run: ${{ env.CMD_NEXTEST }}
 
       - name: Build
         run: ${{ env.CMD_BUILD }}
 
-      - name: Hack Check
-        run: ${{ env.CMD_HACK }}
+  # CI, runs in virtual machines.
+  ci-vm:
+    runs-on: ubuntu-latest
+
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0"
+
+    strategy:
+      matrix:
+        os: [{ name: freebsd, architecture: x86_64, version: "15.1", dependencies: "cmake curl git gmake" }]
+
+    defaults:
+      run:
+        shell: cpa.sh {0} --sync-files none
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download monerod
+        uses: ./.github/actions/monerod-download
+        with:
+          os: ${{ matrix.os.name }}
+          arch: ${{ matrix.os.architecture }}
+
+      - name: Start VM
+        uses: cross-platform-actions/action@v1.4.0
+        with:
+          operating_system: ${{ matrix.os.name }}
+          architecture: ${{ matrix.os.architecture }}
+          version: ${{ matrix.os.version }}
+          memory: 6G
+          cpu_count: 4
+          sync_files: runner-to-vm
+          environment_variables: CARGO_TERM_COLOR RUST_BACKTRACE RUST_MIN_STACK RUSTDOCFLAGS CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG CARGO_INCREMENTAL CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG
+
+      - name: Install dependencies
+        run: |
+          case "${{ matrix.os.name }}" in
+            freebsd)
+              sudo pkg install -y ${{ matrix.os.dependencies }}
+              sudo pkg clean -y
+              ;;
+          esac
+
+      - name: Install Rust
+        if: matrix.os.name == 'freebsd'
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy
+          sudo ln -s "$HOME"/.cargo/bin/* /usr/local/bin/
+
+      - name: Install nextest
+        run: |
+          cargo install cargo-nextest --locked
+
+      - name: Documentation
+        run: |
+          ${{ env.CMD_DOC }}
+          cargo clean --doc
+          rm -rf "$HOME/.cargo/registry/cache"
+          rm -rf "$HOME/.cargo/git/db"
+
+      - name: Clippy (fail on warnings)
+        run: ${{ env.CMD_CLIPPY }}
+
+      - name: Test
+        run: ${{ env.CMD_NEXTEST }}
+
+      - name: Build
+        run: ${{ env.CMD_BUILD }}
+
+  # CI, runs cross-compiled targets under emulation.
+  ci-cross:
+    runs-on: ubuntu-latest
+
+    env:
+      PROPTEST_TIMEOUT: 0
+
+    strategy:
+      matrix:
+        target: [riscv64gc-unknown-linux-gnu]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Install cross toolchain
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: rustcache-cross-${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Documentation
+        run: ${{ env.CMD_DOC }}
+
+      - name: Clippy (fail on warnings)
+        run: ${{ env.CMD_CLIPPY }}
+
+      # There is no prebuilt monerod for RISC-V, so the tests that require it are skipped.
+      - name: Test
+        run: |
+          cargo nextest run --all-features --workspace --exclude cuprate-p2p-core --profile ci
+          cargo nextest run --all-features --package cuprate-p2p-core --profile ci -E 'not test(monerod)'
+          cargo test --all-features --doc --workspace --exclude cuprate-p2p-core
+
+      - name: Build
+        run: ${{ env.CMD_BUILD }}
