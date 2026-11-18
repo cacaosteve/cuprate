@@ -1,5 +1,4 @@
 #![expect(unused_crate_dependencies, reason = "external test module")]
-
 use std::time::Duration;
 
 use futures::StreamExt;

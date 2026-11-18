@@ -1,5 +1,4 @@
 #![expect(unused_crate_dependencies, reason = "external test module")]
-
 use tower::{Service, ServiceExt};
 
 use cuprate_helper::network::Network;
@@ -53,7 +52,7 @@ async fn get_single_block_from_monerod() {
                 .unwrap()
                 .try_into()
                 .unwrap(),
-                pruned: false,
+                prune: false,
             },
         )))
         .await

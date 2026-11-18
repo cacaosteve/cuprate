@@ -191,7 +191,7 @@ async fn real_rpc_dispatch_reports_live_peers_and_redacts_the_public_listener() 
     // Both aliases and both listeners must fail closed before parsing or admission.
     for router in [&admin, &public] {
         for uri in ["/send_raw_transaction", "/sendrawtransaction"] {
-            for blob in [vec![0xff; 64], complete.tx_blob.clone()] {
+            for blob in [bytes::Bytes::from(vec![0xff; 64]), complete.tx_blob.clone()] {
                 let response = json_request(
                     router,
                     uri,

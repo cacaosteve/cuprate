@@ -570,7 +570,7 @@ impl TxpoolManager {
         } else {
             TxRelay::Peer
         };
-        let dandelion_tx = DandelionTx(Bytes::copy_from_slice(&tx.tx_blob), relay);
+        let dandelion_tx = DandelionTx(tx.tx_blob.clone(), relay);
         let policy = dandelion_tx.embargo_policy();
         let incoming_tx =
             IncomingTxBuilder::new(dandelion_tx, tx.tx_hash).with_local_tx_embargo_policy(policy);
